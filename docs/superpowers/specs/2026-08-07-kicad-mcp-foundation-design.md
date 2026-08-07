@@ -65,15 +65,47 @@ kiapi.common.commands.GetOpenDocuments`. The API serves whatever editor frame is
 actually open. This is normal behaviour, not a fault, and users will hit it
 constantly — error translation is a first-class requirement, not polish.
 
-**`kipy` schematic support is broken in 0.7.1.** `import kipy.schematic` raises
-`ImportError`. `schematic_types.py` imports nine enums (`BusEntryType`,
-`SchematicLabelShape`, `SchematicLabelSpinStyle`, `SchematicLineType`,
-`SchematicPinOrientation`, `SchematicPinShape`, `SchematicSymbolOrientation`,
-`SchematicSymbolType`, `SheetSide`) that the generated
-`schematic_types_pb2` in the same wheel does not define — the generated protobuf
-code is out of sync with the hand-written wrappers. PCB support is unaffected.
-Schematic work is deferred to sub-project 4; **sub-project 1 must not import
-`kipy.schematic` anywhere**, including transitively.
+**There is no schematic IPC API in KiCad 10.** This is stronger than a broken
+binding, and it was verified against upstream sources rather than inferred from
+the failing import.
+
+The visible symptom is that `import kipy.schematic` raises `ImportError`:
+`schematic_types.py` imports nine enums (`BusEntryType`, `SchematicLabelShape`,
+`SchematicLabelSpinStyle`, `SchematicLineType`, `SchematicPinOrientation`,
+`SchematicPinShape`, `SchematicSymbolOrientation`, `SchematicSymbolType`,
+`SheetSide`) that the generated `schematic_types_pb2` in the same wheel does not
+define.
+
+Comparing upstream KiCad's `api/proto/schematic/` between the `10.0` release
+branch and `master` explains why:
+
+| | `10.0` branch | `master` (KiCad 11 dev) |
+|---|---|---|
+| `schematic_types.proto` | 1941 bytes — `SchematicLayer`, `Line`, `Text`, 4 label messages | 12137 bytes — 40+ messages including symbols, pins, sheets, nets, and all nine enums |
+| `schematic_commands.proto` | 866 bytes containing **zero messages** — only `syntax` and `package` | `GetSchematicHierarchy`, `GetSchematicNetlist` and their responses |
+
+The installed `schematic_commands_pb2` exports nothing but `DESCRIPTOR`,
+confirming the release branch defines no schematic commands at all.
+
+`kipy` 0.7.1's hand-written wrappers were written against `master`; the generated
+protobuf shipped alongside them came from the `10.0` branch. **Regenerating the
+bindings from `master` protos would therefore fix the `ImportError` and still
+deliver nothing** — eeschema 10.0 registers no schematic handlers, so every call
+would return `no handler available`. This rules out the obvious fix.
+
+Consequences:
+
+- **Sub-project 1 must not import `kipy.schematic` anywhere**, including
+  transitively.
+- **Sub-project 4 cannot be built on IPC.** Its viable surface on KiCad 10 is
+  `kicad-cli sch` (`erc`; `export` to `bom`, `netlist`, `pdf`, `svg`, `dxf`,
+  `python-bom`; `upgrade`) plus direct reading of `.kicad_sch` S-expressions.
+  `netlist --format kicadxml` in particular yields structured components, nets,
+  footprints, and fields — a genuinely capable read path.
+- **IPC schematic support is a KiCad 11 item**, to be revisited when it ships,
+  not engineered around now.
+
+PCB support is entirely unaffected by any of this.
 
 ---
 
@@ -375,7 +407,7 @@ built before the tools they test.
 
 | Risk | Mitigation |
 |---|---|
-| `kipy` 0.7.1 schematic module is broken | Out of scope here; never import it. File upstream issue. Sub-project 4 vendors regenerated protos from KiCad source. |
+| No schematic IPC API exists in KiCad 10 | Never import `kipy.schematic`. SP4 is built on `kicad-cli sch` plus `.kicad_sch` S-expression reading, not IPC. Regenerating protos from `master` is explicitly rejected — it fixes the import but yields `no handler available` on every call. |
 | Live tests need a GUI | Local-only manual checklist; explicitly not automated. |
 | KiCad 11 changes the bundled Python | Never hardcode the interpreter; always derive from `discovery`. |
 | Multiple KiCad versions installed side by side | `discovery` picks highest version; `KICAD_MCP_KICAD_ROOT` pins a specific one; `doctor` reports which was chosen. |
@@ -405,7 +437,13 @@ Sub-project 1 is done when all of the following hold:
 ## 12. Open items
 
 - Confirm `kicad-mcp` is available on PyPI before sub-project 5.
-- File the upstream `kipy` schematic issue; a fix upstream would simplify SP4.
+- File the upstream `kipy` issue that 0.7.1 ships `master`-era schematic wrappers
+  against `10.0`-era generated protobuf, making the module unimportable. Worth
+  reporting as a packaging bug, but note that a fix would only remove the
+  `ImportError` — it would not give KiCad 10 a schematic API, so SP4's plan does
+  not depend on it.
+- Re-evaluate IPC schematic support when KiCad 11 ships; `master` already has
+  `GetSchematicHierarchy` and `GetSchematicNetlist`.
 - Decide whether `kicad_status` and the `kicad://status` resource share one
   implementation — they should, but the MCP SDK's resource and tool signatures
   differ enough to confirm during implementation.
