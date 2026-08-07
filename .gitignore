@@ -7,3 +7,6 @@ kicad_venv/
 dist/
 build/
 .pytest_cache/
+*.net.xml
+*.erc.rpt
+*.bom.csv

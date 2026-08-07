@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kicad-mcp"
+version = "0.1.0"
+description = "MCP server for KiCad 10 — live PCB access, schematic reading, and schematic generation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "mcp>=2.0",
+    "kicad-python>=0.7.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+kicad-mcp = "kicad_mcp.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kicad_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "requires_kicad: needs a KiCad installation present",
+    "requires_running_kicad: needs KiCad running with the IPC server enabled",
+]
