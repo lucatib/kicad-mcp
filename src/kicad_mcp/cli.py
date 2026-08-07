@@ -31,6 +31,10 @@ def run_cli(install, args: list[str], timeout: int = DEFAULT_TIMEOUT) -> dict:
             text=True,
             timeout=timeout,
             check=False,
+            # The MCP server's own stdin is the client's pipe (stdio transport),
+            # which has no OS handle a child process can duplicate. Same failure
+            # mode as running under pytest's captured stdin -- WinError 6.
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired as exc:
         raise CliError(

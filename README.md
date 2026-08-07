@@ -105,6 +105,25 @@ So schematic support here is file-based: `kicad-cli` plus direct `.kicad_sch`
 parsing. That has an upside — it works with KiCad closed, which is what makes
 schematic *generation* possible at all.
 
+### Seeing schematic changes if the file is already open
+
+Because there's no live schematic API, a change any tool here makes to a
+`.kicad_sch` never reaches KiCad's in-memory copy on its own — KiCad only reads
+the file from disk when told to. If you have the schematic open while a tool
+edits it:
+
+- **Use File → Revert**, not just switching windows or waiting. Revert is what
+  makes KiCad re-read the file and show the change.
+- **Don't hit Save first.** Saving from the GUI writes KiCad's in-memory state
+  back over the file, discarding whatever the tool just wrote — the one order
+  that loses work.
+- If Revert isn't available or doesn't pick it up, close the schematic tab and
+  reopen it from the project manager; that always re-reads from disk.
+
+This applies in both directions: if you're editing by hand in KiCad, save from
+KiCad *before* asking for another file-based change, or the tool will act on a
+stale copy and your hand edits will be the ones lost.
+
 ## The escape hatch
 
 `run_kicad_script` executes Python with `kicad`, `board`, `kipy`, `pcbnew`, and

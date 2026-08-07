@@ -243,6 +243,22 @@ class SchematicBuilder:
 
     # --- output --------------------------------------------------------
 
+    def parts(self) -> dict:
+        """The accumulated content, for callers merging into an existing tree.
+
+        `build()` produces a whole new document; an editor modifying a schematic
+        that already exists needs the pieces instead.
+        """
+        return {
+            "lib_symbols": dict(self._lib_symbols),
+            "symbols": list(self._symbols),
+            "wires": list(self._wires),
+            "labels": list(self._labels),
+            "junctions": list(self._junctions),
+            "no_connects": list(self._no_connects),
+            "texts": list(self._texts),
+        }
+
     def build(self) -> sexpr.SExpr:
         title_block: sexpr.SExpr = [Sym("title_block")]
         if self.title:

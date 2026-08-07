@@ -225,9 +225,18 @@ class SymbolIndex:
         return results
 
     def definition(self, lib_id: str) -> sexpr.SExpr:
-        """The symbol node from the library, renamed to `lib_id`.
+        """The symbol node from the library, renamed to `lib_id`, self-contained.
 
         Returned ready to drop into a schematic's `lib_symbols` block.
+
+        Many stock symbols (most regulator and transistor variants, several
+        logic families) are declared with `(extends "Base")` and carry no pins
+        of their own -- the pin and graphic sub-symbols live only on the base.
+        That is fine inside the library, where the base is always alongside it,
+        but a schematic embeds one symbol at a time. So `extends` is resolved
+        here: the base's pin/graphic sub-symbols are merged in and the
+        `extends` property is dropped, leaving one node with no external
+        dependency.
         """
         library, _, symbol = lib_id.partition(":")
         if not symbol:
@@ -242,9 +251,71 @@ class SymbolIndex:
                 f"Symbol {symbol!r} not found in library {entry.name!r}.",
                 remedy="Call search_symbols to find the exact name.",
             )
+        node = self._resolve_extends(entry, node, seen={symbol})
         renamed = list(node)
         renamed[1] = f"{entry.name}:{symbol}"
         return renamed
+
+    #: Leading flag nodes that KiCad expects before any `property`. A derived
+    #: symbol declares none of these itself -- they exist only on the base --
+    #: so they must be copied across, not just the pins.
+    _LEADING_FLAGS = (
+        "pin_numbers", "pin_names", "exclude_from_sim", "in_bom", "on_board",
+        "in_pos_files", "duplicate_pin_numbers_are_jumpers",
+    )
+
+    def _resolve_extends(self, entry: LibraryEntry, node: sexpr.SExpr, seen: set[str]) -> sexpr.SExpr:
+        base_name = sexpr.value(node, "extends")
+        if base_name is None:
+            return node
+        base_name = str(base_name)
+        if base_name in seen:  # pragma: no cover - defensive against a cycle
+            raise ToolInputError(f"Circular 'extends' chain involving {base_name!r}.")
+        base = _find_symbol(entry.path, base_name)
+        if base is None:
+            raise ToolInputError(
+                f"{node[1]!r} extends {base_name!r}, which was not found in {entry.name!r}.",
+            )
+        base = self._resolve_extends(entry, base, seen | {base_name})
+
+        own_names = {sexpr._name_of(n) for n in node if isinstance(n, list)}
+        flags = [
+            n for n in base
+            if isinstance(n, list) and sexpr._name_of(n) in self._LEADING_FLAGS
+            and sexpr._name_of(n) not in own_names
+        ]
+        properties = [n for n in node if isinstance(n, list) and sexpr._name_of(n) == "property"]
+
+        # KiCad expects each unit sub-symbol's name to be prefixed with its
+        # parent's own (un-namespaced) name -- "AMS1117-3.3_1_1", not the
+        # base's "AP1117-15_1_1" -- and rejects the whole file if it isn't.
+        derived_name = str(node[1])
+        own_sub_names = {s[1] for s in sexpr.children(node, "symbol") if len(s) > 1}
+        sub_symbols = []
+        for sub in sexpr.children(base, "symbol"):
+            if len(sub) > 1 and sub[1] in own_sub_names:
+                continue
+            sub = list(sub)
+            suffix = re.search(r"(_\d+_\d+)$", str(sub[1])) if len(sub) > 1 else None
+            if suffix:
+                sub[1] = f"{derived_name}{suffix.group(1)}"
+            sub_symbols.append(sub)
+        # Graphic primitives that sit directly on the base (rare, but valid)
+        # rather than inside a unit sub-symbol.
+        graphics = [
+            n for kind in ("rectangle", "circle", "arc", "polyline", "text")
+            for n in sexpr.children(base, kind)
+        ]
+
+        embedded_fonts = sexpr.child(node, "embedded_fonts") or sexpr.child(base, "embedded_fonts")
+
+        # KiCad's own field order: flags, properties, sub-symbols/graphics,
+        # embedded_fonts last. Getting this wrong produces a file KiCad
+        # silently refuses to load rather than one it reports an error on.
+        merged: sexpr.SExpr = [node[0], node[1], *flags, *properties, *graphics, *sub_symbols]
+        if embedded_fonts is not None:
+            merged.append(embedded_fonts)
+        return merged
 
     def pins(self, lib_id: str) -> list[PinInfo]:
         """Pins of a symbol, gathered from its unit sub-symbols.
