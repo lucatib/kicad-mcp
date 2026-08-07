@@ -8,10 +8,16 @@
 
 ## 1. Context
 
-An MCP server exposing KiCad 10's capabilities to LLM clients. Target audience is
-public open-source, so cross-platform support, tests, CI, and packaging are in
-scope for the programme as a whole (sub-project 5) and must not be designed out
-here.
+An MCP server exposing KiCad 10's capabilities to LLM clients. The project is
+intended for public open-source release, so tests, CI, and packaging remain in
+scope for the programme as a whole (sub-project 5).
+
+**Platform scope: Windows only.** macOS and Linux are explicitly out of scope for
+every sub-project until the Windows implementation is proven. The one concession
+to future portability is that `discovery` keeps a resolver seam (section 3) —
+this costs roughly one interface and no extra implementation, and avoids a
+structural rewrite if the scope later widens. Nothing else in the codebase may
+carry platform-conditional code.
 
 ### Verified environment facts
 
@@ -36,8 +42,8 @@ Python 3.11.5 + `pcbnew` 10.0.5 + `kicad-python` 0.7.1 + `mcp` 2.0.0, with a
 live IPC connection, all in a single process.
 
 ```bash
-"<KICAD>/bin/python.exe" -m venv --system-site-packages .venv
-.venv/bin/pip install kicad-python mcp
+"C:/Program Files/KiCad/10.0/bin/python.exe" -m venv --system-site-packages .venv
+.venv/Scripts/pip install kicad-python mcp
 ```
 
 `_pcbnew.pyd` is a C extension compiled against CPython 3.11's ABI *and* KiCad's
@@ -87,7 +93,9 @@ Schematic work is deferred to sub-project 4; **sub-project 1 must not import
 - Any board mutation (sub-project 2). Read-only, except the escape hatch.
 - `kicad-cli` wrapping (sub-project 3).
 - Anything schematic (sub-project 4).
-- PyPI publication and full CI matrix (sub-project 5).
+- PyPI publication and release CI (sub-project 5).
+- **macOS and Linux support, including Flatpak and Snap.** Not deferred to a
+  later sub-project — out of scope for the project as currently scoped.
 
 ### Explicit anti-goal
 
@@ -161,13 +169,21 @@ later is not.
 ### Module responsibilities
 
 **`discovery`** — find the KiCad installation and its interpreter. Returns a
-`KiCadInstall` dataclass (`root`, `python_path`, `cli_path`, `version`,
-`platform_kind`). Resolution order: explicit `KICAD_MCP_KICAD_ROOT` env var, then
-platform search — Windows registry then `Program Files\KiCad\*`; macOS
-`/Applications/KiCad/KiCad.app`; Linux native paths then Flatpak detection.
+`KiCadInstall` dataclass (`root`, `python_path`, `cli_path`, `version`).
+Resolution order: explicit `KICAD_MCP_KICAD_ROOT` environment variable, then the
+uninstall registry keys under `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\
+Uninstall`, then a glob of `%ProgramFiles%\KiCad\*` picking the highest version.
+Multiple side-by-side KiCad versions are normal and must be handled — the env var
+is how a user pins one.
+
 Never hardcodes a Python version; the interpreter is always derived from the
-discovered install. This is the most portability-critical module and the one
-most likely to generate issues, so it is also the most heavily unit-tested.
+discovered install (`<root>/bin/python.exe`), so a future KiCad bundling a
+different CPython needs no code change.
+
+The resolver seam: a single `InstallResolver` protocol with one Windows
+implementation. This is the only place in the codebase aware of platform
+specifics. It exists so widening scope later means adding a resolver, not
+threading `sys.platform` checks through the package.
 
 **`session`** — owns the `kipy.KiCad` client. Lazy connect, reconnect on
 transport failure, and a `board()` accessor. Does not cache board state; KiCad
@@ -181,7 +197,8 @@ do. Required mappings:
 | `no handler available` | "KiCad is running but no PCB editor is open. Open your board in the PCB editor — the API only serves editors that are currently open." |
 | Connection refused | "Could not reach KiCad. Check KiCad is running and that Preferences → Plugins → 'Enable IPC API server' is on." |
 | API version mismatch | Reports both versions and the supported range. |
-| `pcbnew` import failure | Names the venv bootstrap command; flags Flatpak explicitly. |
+| `pcbnew` import failure | Names the venv bootstrap command, and reports which interpreter is actually running so a wrong-interpreter mistake is obvious. |
+| Non-Windows platform | Fails fast at startup with a clear "Windows only" message rather than a confusing discovery failure. |
 
 **`units`** — KiCad's API works in nanometres. Every tool boundary accepts and
 returns **millimetres** as floats, converting at the edge. Internal code stays in
@@ -326,20 +343,28 @@ start cannot tell the user why it refused to start.
 
 ## 9. Testing
 
-**Unit** (no KiCad, runs everywhere): `discovery` against faked filesystem
-layouts for all four platform kinds; `units` conversions including edge cases;
-`errors` mapping table; tool logic against a fake backend. This tier must pass on
-a machine with no KiCad installed — it is what CI runs on every push.
+All tiers run on Windows. CI uses `windows-latest` runners; there is no platform
+matrix.
+
+**Unit** (no KiCad required): `discovery` against faked registry responses and
+filesystem layouts, including the multiple-versions-installed case and the env
+var override; `units` conversions including edge cases; `errors` mapping table;
+tool logic against a fake backend. This tier must pass on a machine with **no
+KiCad installed** — it is what CI runs on every push, and keeping it truly
+KiCad-free is what makes CI viable at all.
 
 **Integration, headless** (`requires_kicad`): a small `.kicad_pcb` fixture
-committed to the repo, exercised through `pcbnew`. Runnable in CI on Linux with
-KiCad installed from packages.
+committed to the repo, exercised through `pcbnew`. Needs KiCad installed but not
+running. Can run in CI if a Windows KiCad install proves scriptable (winget or a
+cached installer); otherwise local-only.
 
 **Integration, live** (`requires_running_kicad`): the full tool surface against a
-running instance. Needs a GUI, so it runs under `xvfb` in CI if that proves
-reliable, and is marked local-only if it does not. This is honestly the hardest
-tier to automate and should not block sub-project 1 — the decision is deferred to
-sub-project 5 with a documented manual checklist in the interim.
+running instance with a board open. Requires a GUI session, so this tier is
+**local-only and manual**, driven by a documented checklist. Automating it is not
+attempted in sub-project 1 and may never be worth it — the honest position is
+that the live tier is verified by hand and the checklist is the artifact.
+
+Sub-project 1 is not blocked on any CI decision. The unit tier is the gate.
 
 Sequencing follows test-driven development: the fake backend and unit tier are
 built before the tools they test.
@@ -351,9 +376,10 @@ built before the tools they test.
 | Risk | Mitigation |
 |---|---|
 | `kipy` 0.7.1 schematic module is broken | Out of scope here; never import it. File upstream issue. Sub-project 4 vendors regenerated protos from KiCad source. |
-| Live tests need a GUI | Deferred to SP5; manual checklist meanwhile. |
+| Live tests need a GUI | Local-only manual checklist; explicitly not automated. |
 | KiCad 11 changes the bundled Python | Never hardcode the interpreter; always derive from `discovery`. |
-| Flatpak/Snap cannot import `pcbnew` | Documented limitation. `kipy` over IPC still works; headless degrades to `kicad-cli`. `doctor` detects and explains it. |
+| Multiple KiCad versions installed side by side | `discovery` picks highest version; `KICAD_MCP_KICAD_ROOT` pins a specific one; `doctor` reports which was chosen. |
+| Windows-only scope limits OSS adoption | Accepted deliberately. The `InstallResolver` seam keeps the cost of widening scope to one new class. README states the limitation up front rather than letting users discover it on failure. |
 | API version drift | `session` checks `get_api_version()` against a supported range and warns rather than failing hard. |
 | Unit confusion (nm vs mm) | Single documented convention, conversion only at tool boundaries, explicit unit tests. |
 | Escape hatch is arbitrary code execution | Accepted and documented prominently; opt-out evaluated in SP5. |
@@ -370,8 +396,9 @@ Sub-project 1 is done when all of the following hold:
 4. `run_kicad_script` executes a non-trivial multi-step query correctly.
 5. Closing the PCB editor produces the actionable message, not a stack trace.
 6. The server starts and reports degraded status with KiCad absent.
-7. The unit tier passes on a machine with no KiCad installed.
-8. A stranger can go from clone to working server using only the README.
+7. The unit tier passes on a Windows machine with no KiCad installed.
+8. A stranger on Windows can go from clone to working server using only the
+   README, which states the Windows-only scope before anything else.
 
 ---
 
