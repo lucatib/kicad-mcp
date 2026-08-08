@@ -22,6 +22,7 @@ from mcp.server.mcpserver import MCPServer
 from . import cli as kcli
 from . import units
 from .discovery import find_install, find_installs
+from .editor import SchematicEditor, add_decoupling_capacitors as _add_decoupling_capacitors
 from .errors import KicadMcpError, NoEditorOpenError
 from .generator import generate_pinout_schematic
 from .schematic import Schematic, find_project_schematics
@@ -491,6 +492,103 @@ def create_pinout_schematic(
         title=title, mcu_reference=reference, mcu_footprint=footprint,
         connect_power=connect_power,
     )
+
+
+# --- editing existing schematics -----------------------------------------
+
+
+@mcp.tool()
+@tool_result
+def add_symbol_to_schematic(
+    path: str,
+    lib_id: str,
+    assignments: dict[str, str],
+    reference: str | None = None,
+    value: str | None = None,
+    footprint: str = "",
+    project_dir: str | None = None,
+) -> dict:
+    """Place a symbol into an existing .kicad_sch and wire named pins to nets by label.
+
+    Unlike create_pinout_schematic this edits a file that already has content
+    instead of authoring a new one -- existing symbols, wires and labels are
+    left untouched. `assignments` maps pin names or numbers to net names, same
+    matching rules as create_pinout_schematic (case/underscore/hyphen-insensitive).
+    Unlike an MCU there is no automatic power-pin wiring: a connector's pins are
+    not VDD/GND by convention, so nothing is guessed. Call mark_pins_unused
+    separately for pins that should be no-connected rather than left floating.
+    The symbol is placed clear of everything already on the sheet.
+    """
+    index = symbol_index(project_dir)
+    editor = SchematicEditor.load(path)
+    result = editor.place_symbol(
+        index, lib_id, assignments, reference=reference, value=value, footprint=footprint,
+    )
+    editor.save()
+    result["schematic"] = str(editor.path)
+    return result
+
+
+@mcp.tool()
+@tool_result
+def mark_pins_unused(
+    path: str,
+    reference: str,
+    pin_numbers: list[str] | None = None,
+    name_contains: str | None = None,
+    annotate: str | None = None,
+    project_dir: str | None = None,
+) -> dict:
+    """No-connect a set of an already-placed symbol's pins.
+
+    Select pins by exact pin_numbers, by a case-insensitive substring of the
+    pin's own name (name_contains="SD_" catches every SD-bus pin at once), or
+    both. Pass annotate with the pin's real function (e.g. "/RES") to also
+    place that text next to each marked pin -- useful when the symbol's pin
+    name is generic or doesn't say what the net actually is.
+    """
+    index = symbol_index(project_dir)
+    editor = SchematicEditor.load(path)
+    marked = editor.mark_pins_unused(
+        index, reference, pin_numbers=pin_numbers, name_contains=name_contains, annotate=annotate,
+    )
+    editor.save()
+    return {"schematic": str(editor.path), "reference": reference, "marked_count": len(marked), "marked": marked}
+
+
+@mcp.tool()
+@tool_result
+def rewire_power_symbol(path: str, old_lib_id: str, new_lib_id: str, project_dir: str | None = None) -> dict:
+    """Repoint every instance of one power symbol to another, e.g. power:VDD to power:+3V3.
+
+    Only succeeds when both symbols place their pin at the identical position --
+    checked first, since otherwise the existing wire would no longer meet the
+    new symbol's pin and the change would silently break the connection.
+    """
+    index = symbol_index(project_dir)
+    editor = SchematicEditor.load(path)
+    changed = editor.swap_power_symbol(index, old_lib_id, new_lib_id)
+    editor.save()
+    return {"schematic": str(editor.path), "old_lib_id": old_lib_id, "new_lib_id": new_lib_id, "changed_count": changed}
+
+
+@mcp.tool()
+@tool_result
+def add_decoupling_capacitors(
+    path: str,
+    rails: list[str],
+    value: str = "100nF",
+    ground: str = "power:GND",
+    project_dir: str | None = None,
+) -> dict:
+    """Add one decoupling capacitor per named power rail, each tied to ground.
+
+    `rails` are power-symbol lib_ids such as ["power:+3V3", "power:+5V"]. Each
+    capacitor is placed clear of existing content and wired rail-to-ground with
+    its own wire -- not dependent on label matching.
+    """
+    index = symbol_index(project_dir)
+    return _add_decoupling_capacitors(index, path, rails, value=value, ground=ground)
 
 
 # --- escape hatch --------------------------------------------------------

@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import sexpr
 from .errors import ToolInputError
-from .generator import GRID, SchematicBuilder, _snap
+from .generator import GRID, PlacedSymbol, SchematicBuilder, _normalise_key, _snap
 from .schematic import Schematic
 from .sexpr import Sym
 from .symbols import SymbolIndex
@@ -127,7 +127,135 @@ class SchematicEditor:
             return default
         return _snap(max(edges) + margin + new_half)
 
+    def placement(self, reference: str) -> tuple[str, float, float, float]:
+        """The lib_id and (x, y, angle) of an already-placed symbol.
+
+        Every edit that touches an existing symbol -- wiring a new part to one
+        of its pins, marking pins unused -- starts by reconstructing this from
+        the file, since the symbol was placed by an earlier call (or by hand in
+        KiCad) and isn't something the current edit knows about otherwise.
+        """
+        for symbol in sexpr.children(self.tree, "symbol"):
+            ref = next(
+                (p[2] for p in sexpr.children(symbol, "property") if p[1] == "Reference"),
+                None,
+            )
+            if ref == reference:
+                lib_id = str(sexpr.value(symbol, "lib_id", ""))
+                at = sexpr.values(symbol, "at")
+                if not lib_id or not at:
+                    break
+                return lib_id, float(at[0]), float(at[1]), float(at[2]) if len(at) > 2 else 0.0
+        raise ToolInputError(
+            f"No symbol with reference {reference!r} in {self.path.name}.",
+            remedy="Call list_schematic_symbols to see what's placed.",
+        )
+
     # --- edits ----------------------------------------------------------
+
+    def mark_pins_unused(
+        self,
+        index: SymbolIndex,
+        reference: str,
+        pin_numbers: list[str] | None = None,
+        name_contains: str | None = None,
+        annotate: str | None = None,
+    ) -> list[dict]:
+        """No-connect a set of an existing symbol's pins, optionally labelled.
+
+        Selects by `pin_numbers` (exact) and/or `name_contains` (case-insensitive
+        substring on the pin's own name, e.g. "SD_" to catch every SD-bus pin at
+        once). `annotate` places that literal text next to every matched pin --
+        pass the pin's real function (e.g. "/RES") when the symbol's own pin
+        name is generic or the net was never actually wired to anything.
+        """
+        lib_id, x, y, angle = self.placement(reference)
+        placed = PlacedSymbol(reference, "", lib_id, x=x, y=y, angle=angle, unit=1, uuid="")
+        all_pins = index.pins(lib_id)
+
+        wanted = set(pin_numbers or [])
+        needle = name_contains.lower() if name_contains else None
+        matched = [
+            p for p in all_pins
+            if p.number in wanted or (needle and needle in p.name.lower())
+        ]
+        if not matched:
+            raise ToolInputError(
+                f"No pins on {reference} matched pin_numbers={pin_numbers!r} "
+                f"name_contains={name_contains!r}.",
+                remedy="Call get_symbol_pins to see the real pin names and numbers.",
+            )
+
+        builder = self._builder()
+        marked = []
+        for pin in matched:
+            pt = placed.pin_point(pin)
+            builder.add_no_connect(pt)
+            if annotate:
+                dx, dy = placed.pin_outward(pin)
+                text_at = (_snap(pt[0] + dx * 5.08), _snap(pt[1] + dy * 5.08))
+                builder.add_text(annotate, text_at, size=1.27)
+            marked.append({"number": pin.number, "name": pin.name})
+
+        self._merge(builder)
+        return marked
+
+    def place_symbol(
+        self,
+        index: SymbolIndex,
+        lib_id: str,
+        assignments: dict[str, str],
+        reference: str | None = None,
+        value: str | None = None,
+        footprint: str = "",
+        at: tuple[float, float] | None = None,
+    ) -> dict:
+        """Place a new symbol into this (already-existing) schematic and wire
+        named pins to nets by label.
+
+        This is `generate_pinout_schematic`'s pin-matching and label-wiring,
+        aimed at a file that already has content instead of authoring a fresh
+        one. Unlike that function there is no MCU-specific power auto-wiring --
+        a generic connector's pins 1/5/6 are not "VDD"/"GND" by convention, so
+        guessing would be wrong more often than it helped. Call
+        `mark_pins_unused` separately for pins that should be no-connected
+        rather than left floating.
+        """
+        prefix = "".join(c for c in lib_id.split(":")[-1] if c.isalpha())[:1] or "U"
+        reference = reference or self.next_reference(prefix)
+        value = value if value is not None else lib_id.split(":")[-1]
+        x, y = at if at else (self.free_x(index, lib_id), 101.6)
+        x, y = _snap(x), _snap(y)
+
+        builder = self._builder()
+        placed = builder.add_symbol(index, lib_id, reference, value, x=x, y=y, footprint=footprint)
+
+        by_key: dict[str, list] = {}
+        for pin in placed.pins:
+            for key in (_normalise_key(pin.name), _normalise_key(pin.number)):
+                if key:
+                    by_key.setdefault(key, []).append(pin)
+
+        connected, unmatched = [], []
+        for raw_key, net in assignments.items():
+            key = _normalise_key(str(raw_key))
+            candidates = by_key.get(key) or by_key.get(key.replace("GPIO", "IO"))
+            if not candidates:
+                unmatched.append(str(raw_key))
+                continue
+            pin = candidates[0]
+            builder.label_pin(placed, pin, str(net))
+            connected.append({"pin": pin.number, "pin_name": pin.name, "net": str(net)})
+
+        self._merge(builder)
+        return {
+            "reference": reference,
+            "lib_id": lib_id,
+            "position": {"x": x, "y": y},
+            "connected": connected,
+            "unmatched_assignments": unmatched,
+            "available_pin_names": [p.name for p in placed.pins][:200],
+        }
 
     def swap_power_symbol(self, index: SymbolIndex, old_lib_id: str, new_lib_id: str) -> int:
         """Repoint power symbols from one rail to another.

@@ -64,6 +64,9 @@ KiCad is running, and a remedy for anything that fails.
 
 **Generation** — `create_pinout_schematic`
 
+**Editing existing schematics** — `add_symbol_to_schematic`, `mark_pins_unused`,
+`rewire_power_symbol`, `add_decoupling_capacitors`
+
 **Escape hatch** — `run_kicad_script`
 
 ### Generating a schematic from a pinout
