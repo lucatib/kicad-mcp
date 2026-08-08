@@ -144,31 +144,35 @@ class SymbolIndex:
     def __init__(self, install, project_dir: Path | None = None) -> None:
         self.install = install
         self.project_dir = Path(project_dir) if project_dir else None
-        self._entries: dict[str, LibraryEntry] | None = None
 
     @property
     def entries(self) -> dict[str, LibraryEntry]:
-        if self._entries is None:
-            variables = _substitution_vars(self.install, self.project_dir)
-            seen: set[Path] = set()
-            found: list[LibraryEntry] = []
+        # Rebuilt on every access rather than memoized. A SymbolIndex is
+        # cached per project_dir for the life of the server (server.py's
+        # _INDEX_CACHE), so memoizing here meant an edit to a project's
+        # sym-lib-table -- registering a new project-local library, say --
+        # was invisible until the server restarted. These are table files
+        # (listings, not symbol content), so a rebuild costs ~10 ms against
+        # the 30-200 ms of the search and pin lookups it feeds.
+        variables = _substitution_vars(self.install, self.project_dir)
+        seen: set[Path] = set()
+        found: list[LibraryEntry] = []
 
-            cfg = _config_dir(self.install.major)
-            if cfg:
-                found.extend(_read_table(cfg / "sym-lib-table", variables, seen))
-            # Fall back to the stock table directly, so a machine whose user
-            # config was never initialised still sees the shipped libraries.
-            found.extend(
-                _read_table(
-                    self.install.share_dir / "template" / "sym-lib-table", variables, seen
-                )
+        cfg = _config_dir(self.install.major)
+        if cfg:
+            found.extend(_read_table(cfg / "sym-lib-table", variables, seen))
+        # Fall back to the stock table directly, so a machine whose user
+        # config was never initialised still sees the shipped libraries.
+        found.extend(
+            _read_table(
+                self.install.share_dir / "template" / "sym-lib-table", variables, seen
             )
-            if self.project_dir:
-                found.extend(
-                    _read_table(self.project_dir / "sym-lib-table", variables, seen)
-                )
-            self._entries = {e.name: e for e in found}
-        return self._entries
+        )
+        if self.project_dir:
+            found.extend(
+                _read_table(self.project_dir / "sym-lib-table", variables, seen)
+            )
+        return {e.name: e for e in found}
 
     def list_libraries(self, present_only: bool = True) -> list[dict]:
         out = []
@@ -179,11 +183,12 @@ class SymbolIndex:
         return out
 
     def library(self, name: str) -> LibraryEntry:
-        entry = self.entries.get(name)
+        entries = self.entries  # one build, reused below
+        entry = entries.get(name)
         if entry is None:
-            close = [n for n in self.entries if n.lower() == name.lower()]
+            close = [n for n in entries if n.lower() == name.lower()]
             if close:
-                entry = self.entries[close[0]]
+                entry = entries[close[0]]
             else:
                 raise ToolInputError(
                     f"No symbol library named {name!r}.",
@@ -204,9 +209,10 @@ class SymbolIndex:
         """
         q = query.lower()
         results: list[dict] = []
-        names = [library] if library else list(self.entries)
+        entries = self.entries  # one build, reused for every name below
+        names = [library] if library else list(entries)
         for lib_name in names:
-            entry = self.entries.get(lib_name) if library is None else self.library(lib_name)
+            entry = entries.get(lib_name) if library is None else self.library(lib_name)
             if entry is None or not entry.exists():
                 continue
             for sym_name in _symbol_names(entry.path):
@@ -358,8 +364,20 @@ def _pin_info(pin: sexpr.SExpr, unit: int) -> PinInfo:
 
 
 @lru_cache(maxsize=64)
-def _parse_library(path_str: str) -> sexpr.SExpr:
+def _parse_library_cached(path_str: str, stamp: tuple[int, int]) -> sexpr.SExpr:
     return sexpr.parse(Path(path_str).read_text(encoding="utf-8"))
+
+
+def _parse_library(path_str: str) -> sexpr.SExpr:
+    # The stamp is part of the cache key, so editing a library file evicts the
+    # stale parse instead of serving it for the life of the process. Same
+    # size+mtime scheme _symbol_names uses for its on-disk cache.
+    try:
+        stat = Path(path_str).stat()
+        stamp = (int(stat.st_mtime), stat.st_size)
+    except OSError:
+        stamp = (0, 0)
+    return _parse_library_cached(path_str, stamp)
 
 
 #: Top-level symbols sit at exactly one tab; nested unit variants are deeper.
