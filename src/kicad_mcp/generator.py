@@ -59,6 +59,13 @@ def _property(name: str, value: str, x: float, y: float, angle: float = 0,
     ]
 
 
+def _property_value(node: sexpr.SExpr, name: str) -> str:
+    for prop in sexpr.children(node, "property"):
+        if len(prop) >= 3 and prop[1] == name:
+            return str(prop[2])
+    return ""
+
+
 @dataclass
 class PlacedSymbol:
     reference: str
@@ -71,6 +78,17 @@ class PlacedSymbol:
     uuid: str
     footprint: str = ""
     pins: list[PinInfo] = field(default_factory=list)
+    #: KiCad's `(mirror x)` flips about the horizontal axis (canvas y negated),
+    #: `(mirror y)` about the vertical one (canvas x negated); both apply after
+    #: rotation. Symbols we place are never mirrored, but hand-placed ones are.
+    mirror: str | None = None
+
+    def _mirrored(self, dx: float, dy: float) -> tuple[float, float]:
+        if self.mirror == "x":
+            dy = -dy
+        elif self.mirror == "y":
+            dx = -dx
+        return dx, dy
 
     def pin_point(self, pin: PinInfo) -> tuple[float, float]:
         """Canvas coordinates of a pin's connection point."""
@@ -79,12 +97,14 @@ class PlacedSymbol:
             a = math.radians(self.angle)
             cos_a, sin_a = math.cos(a), math.sin(a)
             px, py = px * cos_a - py * sin_a, px * sin_a + py * cos_a
-        return (round(self.x + px, 4), round(self.y - py, 4))
+        dx, dy = self._mirrored(px, -py)
+        return (round(self.x + dx, 4), round(self.y + dy, 4))
 
     def pin_outward(self, pin: PinInfo) -> tuple[float, float]:
         """Unit vector pointing away from the symbol body, in canvas space."""
         a = math.radians(pin.angle + self.angle)
-        return (round(-math.cos(a), 6), round(math.sin(a), 6))
+        dx, dy = self._mirrored(-math.cos(a), math.sin(a))
+        return (round(dx, 6), round(dy, 6))
 
 
 class SchematicBuilder:
@@ -121,6 +141,10 @@ class SchematicBuilder:
         """
         if lib_id not in self._lib_symbols:
             self._lib_symbols[lib_id] = index.definition(lib_id)
+        # The embedded definition's Footprint is only a library default; the
+        # instance's own field is what the netlist and PCB actually read. Left
+        # empty, the part silently arrives on the board with no footprint.
+        footprint = footprint or _property_value(self._lib_symbols[lib_id], "Footprint")
 
         pins = [p for p in index.pins(lib_id) if p.unit in (0, unit)]
         placed = PlacedSymbol(

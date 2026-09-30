@@ -5,7 +5,7 @@ open in KiCad, file-based access to schematics, symbol library search, schematic
 generation from a firmware pinout, and a scripting escape hatch for everything
 else.
 
-Verified against KiCad **10.0.5**, API **10.0.1**, `kicad-python` **0.7.1**,
+Verified against KiCad **10.0.6**, API **10.0.1**, `kicad-python` **0.7.1**,
 `mcp` **2.0.0**.
 
 ## Why a venv built from KiCad's own Python
@@ -64,8 +64,8 @@ KiCad is running, and a remedy for anything that fails.
 
 **Generation** — `create_pinout_schematic`
 
-**Editing existing schematics** — `add_symbol_to_schematic`, `mark_pins_unused`,
-`rewire_power_symbol`, `add_decoupling_capacitors`
+**Editing existing schematics** — `add_symbol_to_schematic`, `label_pins`,
+`mark_pins_unused`, `rewire_power_symbol`, `add_decoupling_capacitors`
 
 **Escape hatch** — `run_kicad_script`
 
@@ -82,7 +82,12 @@ KiCad is running, and a remedy for anything that fails.
 Pin matching ignores case, underscores and hyphens, so `IO4`, `GPIO_4` and `io4`
 all resolve to the same pin. Assigned pins get a wire and a net label; power pins
 get power symbols plus `PWR_FLAG` so ERC does not report undriven rails.
-Unmatched assignments are reported back rather than silently dropped.
+Unmatched assignments are reported back rather than silently dropped. Placed
+symbols take their library's default footprint unless you pass one.
+
+To wire a symbol that is already on the sheet, `label_pins` takes the same
+`assignments` map for a `reference`. It skips any pin that already has something
+connected, so an existing net is never shorted to a new one.
 
 The output is a normal `.kicad_sch` you can open and keep editing. It is written
 directly, so KiCad does not need to be running.

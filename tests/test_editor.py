@@ -192,3 +192,130 @@ class TestAddDecouplingCapacitors:
         assert res["count"] == 2
         xs = [c["position"]["x"] for c in res["added"]]
         assert len(set(xs)) == 2
+
+
+def _footprint_of(path, reference):
+    from kicad_mcp import sexpr
+
+    tree = sexpr.parse(path.read_text(encoding="utf-8"))
+    for symbol in sexpr.children(tree, "symbol"):
+        props = {p[1]: p[2] for p in sexpr.children(symbol, "property") if len(p) >= 3}
+        if props.get("Reference") == reference:
+            return props.get("Footprint")
+    raise AssertionError(f"{reference} not in {path}")
+
+
+def _orient(path, reference, angle=0, mirror=None):
+    """Rotate/mirror a placed symbol in the file, as a user might in KiCad."""
+    from kicad_mcp import sexpr
+    from kicad_mcp.sexpr import Sym
+
+    tree = sexpr.parse(path.read_text(encoding="utf-8"))
+    for symbol in sexpr.children(tree, "symbol"):
+        props = {p[1]: p[2] for p in sexpr.children(symbol, "property") if len(p) >= 3}
+        if props.get("Reference") != reference:
+            continue
+        at = sexpr.child(symbol, "at")
+        at[3] = angle
+        if mirror:
+            symbol.insert(symbol.index(at) + 1, [Sym("mirror"), Sym(mirror)])
+    path.write_text(sexpr.dumps(tree), encoding="utf-8")
+
+
+def _nodes(root, net_name):
+    net = next((n for n in root.findall("./nets/net") if n.get("name") == net_name), None)
+    if net is None:
+        return set()
+    return {(node.get("ref"), node.get("pin")) for node in net.findall("node")}
+
+
+class TestLibraryDefaultFootprint:
+    PSU = "Converter_ACDC:HLK-PM01"
+    PSU_FP = "Converter_ACDC:Converter_ACDC_Hi-Link_HLK-PMxx"
+
+    def test_placed_symbol_inherits_library_footprint(self, index, base_sch):
+        editor = SchematicEditor.load(base_sch)
+        res = editor.place_symbol(index, self.PSU, {}, reference="PS1")
+        editor.save()
+        assert _footprint_of(base_sch, "PS1") == self.PSU_FP
+        assert res["footprint"] == self.PSU_FP
+
+    def test_explicit_footprint_overrides_library_default(self, index, base_sch):
+        editor = SchematicEditor.load(base_sch)
+        editor.place_symbol(index, self.PSU, {}, reference="PS1", footprint="Lib:Other")
+        editor.save()
+        assert _footprint_of(base_sch, "PS1") == "Lib:Other"
+
+    def test_generated_mcu_inherits_library_footprint(self, index, base_sch):
+        expected = next(
+            p[2] for p in index.definition(MCU) if isinstance(p, list) and p[1:2] == ["Footprint"]
+        )
+        assert expected, "fixture assumption: the MCU symbol ships a default footprint"
+        assert _footprint_of(base_sch, "U1") == expected
+
+    def test_netlist_carries_the_footprint(self, install, index, base_sch):
+        editor = SchematicEditor.load(base_sch)
+        editor.place_symbol(index, self.PSU, {}, reference="PS1")
+        editor.save()
+        root = _netlist(install, base_sch)
+        comp = next(c for c in root.findall("./components/comp") if c.get("ref") == "PS1")
+        assert comp.findtext("footprint") == self.PSU_FP
+
+
+class TestLabelPins:
+    def _place_conn(self, index, path):
+        editor = SchematicEditor.load(path)
+        editor.place_symbol(index, CONN, {}, reference="J1")
+        editor.save()
+
+    def test_joins_existing_net(self, install, index, base_sch):
+        self._place_conn(index, base_sch)
+        editor = SchematicEditor.load(base_sch)
+        res = editor.label_pins(index, "J1", {"1": "LED"})
+        editor.save()
+
+        assert res["connected"] == [{"pin": "1", "pin_name": "Pin_1", "net": "LED"}]
+        refs = {ref for ref, _ in _nodes(_netlist(install, base_sch), "/LED")}
+        assert refs == {"U1", "J1"}
+
+    @pytest.mark.parametrize("angle,mirror", [
+        (0, None), (90, None), (180, None), (270, None),
+        (0, "x"), (0, "y"), (90, "x"), (90, "y"),
+    ])
+    def test_lands_on_pins_of_rotated_and_mirrored_symbols(
+        self, install, index, base_sch, angle, mirror
+    ):
+        self._place_conn(index, base_sch)
+        _orient(base_sch, "J1", angle, mirror)
+
+        editor = SchematicEditor.load(base_sch)
+        editor.label_pins(index, "J1", {"1": "NA", "2": "NB", "3": "NC"})
+        editor.save()
+
+        root = _netlist(install, base_sch)
+        for pin, net in (("1", "/NA"), ("2", "/NB"), ("3", "/NC")):
+            assert ("J1", pin) in _nodes(root, net), f"label {net} missed J1 pin {pin}"
+
+    def test_skips_pin_that_is_already_connected(self, install, index, base_sch):
+        # U1's IO4 already carries the LED label from generation. A second label
+        # would silently short LED to the new net, so it must be refused.
+        editor = SchematicEditor.load(base_sch)
+        res = editor.label_pins(index, "U1", {"IO4": "OTHER"})
+        editor.save()
+
+        assert res["connected"] == []
+        assert [s["pin_name"] for s in res["already_connected"]] == ["IO4"]
+        root = _netlist(install, base_sch)
+        assert _nodes(root, "/OTHER") == set()
+
+    def test_unmatched_assignment_reported(self, index, base_sch):
+        self._place_conn(index, base_sch)
+        editor = SchematicEditor.load(base_sch)
+        res = editor.label_pins(index, "J1", {"1": "A", "NOPE": "B"})
+        assert res["unmatched_assignments"] == ["NOPE"]
+        assert len(res["connected"]) == 1
+
+    def test_unknown_reference_raises(self, index, base_sch):
+        editor = SchematicEditor.load(base_sch)
+        with pytest.raises(ToolInputError):
+            editor.label_pins(index, "J99", {"1": "A"})

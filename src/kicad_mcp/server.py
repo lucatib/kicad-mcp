@@ -517,13 +517,40 @@ def add_symbol_to_schematic(
     Unlike an MCU there is no automatic power-pin wiring: a connector's pins are
     not VDD/GND by convention, so nothing is guessed. Call mark_pins_unused
     separately for pins that should be no-connected rather than left floating.
-    The symbol is placed clear of everything already on the sheet.
+    The symbol is placed clear of everything already on the sheet. An empty
+    footprint takes the library symbol's default footprint.
     """
     index = symbol_index(project_dir)
     editor = SchematicEditor.load(path)
     result = editor.place_symbol(
         index, lib_id, assignments, reference=reference, value=value, footprint=footprint,
     )
+    editor.save()
+    result["schematic"] = str(editor.path)
+    return result
+
+
+@mcp.tool()
+@tool_result
+def label_pins(
+    path: str,
+    reference: str,
+    assignments: dict[str, str],
+    project_dir: str | None = None,
+) -> dict:
+    """Wire named pins of an already-placed symbol to nets by label.
+
+    add_symbol_to_schematic only labels pins at the moment it places a symbol;
+    use this for symbols already on the sheet, placed earlier or by hand
+    (rotated and mirrored symbols included). `assignments` maps pin names or
+    numbers to net names, same matching rules as add_symbol_to_schematic. Two
+    pins given the same net name are connected. A pin that already has a wire,
+    label, no-connect or another pin on it is left alone and listed under
+    already_connected, since a second label would short two nets together.
+    """
+    index = symbol_index(project_dir)
+    editor = SchematicEditor.load(path)
+    result = editor.label_pins(index, reference, assignments)
     editor.save()
     result["schematic"] = str(editor.path)
     return result

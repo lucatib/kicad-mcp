@@ -19,7 +19,7 @@ from .errors import ToolInputError
 from .generator import GRID, PlacedSymbol, SchematicBuilder, _normalise_key, _snap
 from .schematic import Schematic
 from .sexpr import Sym
-from .symbols import SymbolIndex
+from .symbols import PinInfo, SymbolIndex
 
 #: Where a two-pin part's pins sit relative to its centre, for Device:C and
 #: friends: pin 1 above, pin 2 below, both on the 1.27 mm grid.
@@ -230,32 +230,118 @@ class SchematicEditor:
         builder = self._builder()
         placed = builder.add_symbol(index, lib_id, reference, value, x=x, y=y, footprint=footprint)
 
-        by_key: dict[str, list] = {}
-        for pin in placed.pins:
-            for key in (_normalise_key(pin.name), _normalise_key(pin.number)):
-                if key:
-                    by_key.setdefault(key, []).append(pin)
-
-        connected, unmatched = [], []
-        for raw_key, net in assignments.items():
-            key = _normalise_key(str(raw_key))
-            candidates = by_key.get(key) or by_key.get(key.replace("GPIO", "IO"))
-            if not candidates:
-                unmatched.append(str(raw_key))
-                continue
-            pin = candidates[0]
-            builder.label_pin(placed, pin, str(net))
-            connected.append({"pin": pin.number, "pin_name": pin.name, "net": str(net)})
+        matched, unmatched = _match_pins([placed], assignments)
+        connected = []
+        for sym, pin, net in matched:
+            builder.label_pin(sym, pin, net)
+            connected.append({"pin": pin.number, "pin_name": pin.name, "net": net})
 
         self._merge(builder)
         return {
             "reference": reference,
             "lib_id": lib_id,
             "position": {"x": x, "y": y},
+            "footprint": placed.footprint,
             "connected": connected,
             "unmatched_assignments": unmatched,
             "available_pin_names": [p.name for p in placed.pins][:200],
         }
+
+    def label_pins(
+        self,
+        index: SymbolIndex,
+        reference: str,
+        assignments: dict[str, str],
+    ) -> dict:
+        """Wire named pins of an already-placed symbol to nets by label.
+
+        `place_symbol` can only label pins at the moment it places a symbol;
+        this is the same pin-matching and label-wiring for one that is already
+        on the sheet -- placed by an earlier call or by hand, rotated or
+        mirrored. Multi-unit symbols are searched across every placed unit.
+
+        A pin that already has something at its connection point (a wire, a
+        label, a no-connect, another symbol's pin) is skipped and reported, not
+        labelled: a second label there would silently short two nets together.
+        """
+        placed = self.placements(index, reference)
+        matched, unmatched = _match_pins(placed, assignments)
+        occupied = self._occupied_points(index, exclude=reference)
+
+        builder = self._builder()
+        connected, skipped = [], []
+        for sym, pin, net in matched:
+            entry = {"pin": pin.number, "pin_name": pin.name, "net": net}
+            if _key(sym.pin_point(pin)) in occupied:
+                skipped.append(entry)
+                continue
+            builder.label_pin(sym, pin, net)
+            connected.append(entry)
+
+        self._merge(builder)
+        return {
+            "reference": reference,
+            "connected": connected,
+            "already_connected": skipped,
+            "unmatched_assignments": unmatched,
+            "available_pin_names": [p.name for s in placed for p in s.pins][:200],
+        }
+
+    def placements(self, index: SymbolIndex, reference: str) -> list[PlacedSymbol]:
+        """Every placed unit of `reference`, with its orientation and own pins."""
+        found = []
+        for symbol in sexpr.children(self.tree, "symbol"):
+            if _reference(symbol) != reference:
+                continue
+            lib_id = str(sexpr.value(symbol, "lib_id", ""))
+            at = sexpr.values(symbol, "at")
+            if not lib_id or not at:
+                continue
+            unit = int(sexpr.value(symbol, "unit", 1))
+            mirror = sexpr.value(symbol, "mirror")
+            found.append(PlacedSymbol(
+                reference, "", lib_id,
+                x=float(at[0]), y=float(at[1]),
+                angle=float(at[2]) if len(at) > 2 else 0.0,
+                unit=unit, uuid="", mirror=str(mirror) if mirror else None,
+                pins=[p for p in index.pins(lib_id) if p.unit in (0, unit)],
+            ))
+        if not found:
+            raise ToolInputError(
+                f"No symbol with reference {reference!r} in {self.path.name}.",
+                remedy="Call list_schematic_symbols to see what's placed.",
+            )
+        return found
+
+    def _occupied_points(self, index: SymbolIndex, exclude: str) -> set[tuple[float, float]]:
+        """Canvas points where something already makes a connection.
+
+        Pins of `exclude` itself are left out: they are what we are labelling,
+        and a symbol's own stacked pins (several GND pins on one point) are
+        already the same net by design.
+        """
+        points: set[tuple[float, float]] = set()
+        for wire in sexpr.children(self.tree, "wire"):
+            pts = sexpr.child(wire, "pts")
+            for xy in sexpr.children(pts, "xy") if pts is not None else []:
+                points.add(_key((float(xy[1]), float(xy[2]))))
+        for kind in ("label", "global_label", "hierarchical_label", "no_connect"):
+            for node in sexpr.children(self.tree, kind):
+                at = sexpr.values(node, "at")
+                if at:
+                    points.add(_key((float(at[0]), float(at[1]))))
+
+        others = {
+            ref for symbol in sexpr.children(self.tree, "symbol")
+            if (ref := _reference(symbol)) and ref != exclude
+        }
+        for ref in others:
+            try:
+                for sym in self.placements(index, ref):
+                    points.update(_key(sym.pin_point(p)) for p in sym.pins)
+            except ToolInputError:
+                continue  # a symbol whose library is gone still can't be labelled over
+        return points
 
     def swap_power_symbol(self, index: SymbolIndex, old_lib_id: str, new_lib_id: str) -> int:
         """Repoint power symbols from one rail to another.
@@ -427,6 +513,45 @@ class SchematicEditor:
     def save(self) -> Path:
         self.path.write_text(sexpr.dumps(self.tree), encoding="utf-8")
         return self.path
+
+
+def _reference(symbol: sexpr.SExpr) -> str | None:
+    for prop in sexpr.children(symbol, "property"):
+        if len(prop) >= 3 and prop[1] == "Reference":
+            return str(prop[2])
+    return None
+
+
+def _key(point: tuple[float, float]) -> tuple[float, float]:
+    """Coordinates comparable across our float maths and KiCad's written values."""
+    return (round(point[0], 2), round(point[1], 2))
+
+
+def _match_pins(
+    placed: list[PlacedSymbol], assignments: dict[str, str]
+) -> tuple[list[tuple[PlacedSymbol, PinInfo, str]], list[str]]:
+    """Resolve assignment keys to pins by name or number.
+
+    Case-insensitive and blind to underscores and hyphens, and `GPIO4` also
+    finds a pin named `IO4` -- firmware and symbol authors disagree on both.
+    """
+    by_key: dict[str, list[tuple[PlacedSymbol, PinInfo]]] = {}
+    for sym in placed:
+        for pin in sym.pins:
+            for key in (_normalise_key(pin.name), _normalise_key(pin.number)):
+                if key:
+                    by_key.setdefault(key, []).append((sym, pin))
+
+    matched, unmatched = [], []
+    for raw_key, net in assignments.items():
+        key = _normalise_key(str(raw_key))
+        candidates = by_key.get(key) or by_key.get(key.replace("GPIO", "IO"))
+        if not candidates:
+            unmatched.append(str(raw_key))
+            continue
+        sym, pin = candidates[0]
+        matched.append((sym, pin, str(net)))
+    return matched, unmatched
 
 
 def _insert_index(tree: sexpr.SExpr) -> int:
