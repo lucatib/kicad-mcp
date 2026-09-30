@@ -10,3 +10,4 @@ build/
 *.net.xml
 *.erc.rpt
 *.bom.csv
+.codex/
