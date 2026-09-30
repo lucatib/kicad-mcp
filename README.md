@@ -68,7 +68,7 @@ KiCad is running, and a remedy for anything that fails.
 
 **Editing existing schematics** — `add_symbol_to_schematic`, `label_pins`,
 `set_symbol_fields`, `mark_pins_unused`, `rewire_power_symbol`,
-`add_decoupling_capacitors`
+`add_decoupling_capacitors`, `route_nets`
 
 **Escape hatch** — `run_kicad_script`
 
@@ -98,6 +98,24 @@ refused rather than drawn off-page; pass `x`/`y` to place explicitly. Footprints
 written by `add_symbol_to_schematic` or `set_symbol_fields` are checked against
 the project's `fp-lib-table`, and one that will not resolve is reported with the
 same footprint under a library that does.
+
+### Drawing wires: `route_nets`
+
+The tools connect pins with net labels. Once placement, labelling and ERC are
+done, `route_nets` turns those labels into drawn wires as the last step. It runs
+entirely inside the server; the client passes only the file:
+
+```json
+{"path": "C:/proj/board.kicad_sch"}
+```
+
+Every signal net connected purely by local labels is wired pin to pin around the
+parts, keeping one label with its name. Power symbols, global and hierarchical
+labels, and anything you wired by hand are left alone. The result is checked with
+`kicad-cli` before anything is written: the netlist must be identical and ERC must
+report no new violations, or the routing is discarded and the file is untouched.
+Use `nets` to route only some nets, `max_length` (mm) to keep long connections as
+labels, and `dry_run` to verify without writing.
 
 The output is a normal `.kicad_sch` you can open and keep editing. It is written
 directly, so KiCad does not need to be running.

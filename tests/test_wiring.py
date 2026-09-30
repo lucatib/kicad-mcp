@@ -204,3 +204,82 @@ class TestLeftAlone:
 
         assert [r["net"] for r in res["routed"]] == ["OTHER"]
         assert len(_labels(sch, "LED")) == 2
+
+
+class TestVerifiedTool:
+    """The MCP tool: route on a copy, prove it with kicad-cli, then write."""
+
+    def _tool(self, sch, **kwargs):
+        from kicad_mcp import server
+
+        return server.route_nets(str(sch), **kwargs)
+
+    def test_routes_verifies_and_writes(self, install, index, sch):
+        _place(index, sch, CONN, {"1": "LED"}, "J1")
+        before = _connectivity(install, sch)
+
+        res = self._tool(sch)
+
+        assert "error" not in res, res
+        assert res["written"] is True
+        assert res["verification"].startswith("passed")
+        assert res["erc_violations"]["after"] <= res["erc_violations"]["before"]
+        assert _connectivity(install, sch) == before
+        assert len(_labels(sch, "LED")) == 1
+
+    def test_dry_run_verifies_but_never_writes(self, index, sch):
+        _place(index, sch, CONN, {"1": "LED"}, "J1")
+        before = sch.read_bytes()
+
+        res = self._tool(sch, dry_run=True)
+
+        assert res["written"] is False
+        assert res["verification"].startswith("passed")
+        assert sch.read_bytes() == before
+
+    def test_changed_connectivity_is_refused_and_file_untouched(self, index, sch, monkeypatch):
+        _place(index, sch, CONN, {"1": "LED"}, "J1")
+        before = sch.read_bytes()
+        real = wiring.route_nets
+
+        def shorting(editor, *a, **k):
+            # Route for real, then "misplace" the kept label onto GND's name:
+            # exactly the kind of mistake verification exists to catch.
+            result = real(editor, *a, **k)
+            for label in sexpr.children(editor.tree, "label"):
+                if label[1] == "LED":
+                    label[1] = "GND"
+            return result
+
+        monkeypatch.setattr(wiring, "route_nets", shorting)
+        res = self._tool(sch)
+
+        assert res["written"] is False
+        assert "connectivity" in res["verification"]
+        assert sch.read_bytes() == before
+
+    def test_more_erc_violations_is_refused_and_file_untouched(self, index, sch, monkeypatch):
+        _place(index, sch, CONN, {"1": "LED"}, "J1")
+        before = sch.read_bytes()
+        real = wiring.route_nets
+
+        def dangling(editor, *a, **k):
+            result = real(editor, *a, **k)
+            builder = editor._builder()
+            builder.add_wire((25.4, 25.4), (30.48, 25.4))  # connects nothing: ERC warns
+            editor._merge(builder)
+            return result
+
+        monkeypatch.setattr(wiring, "route_nets", dangling)
+        res = self._tool(sch)
+
+        assert res["written"] is False
+        assert "ERC" in res["verification"]
+        assert sch.read_bytes() == before
+
+    def test_nothing_to_route_leaves_file_untouched(self, index, sch):
+        before = sch.read_bytes()
+        res = self._tool(sch)
+        assert res["written"] is False
+        assert res["routed"] == []
+        assert sch.read_bytes() == before

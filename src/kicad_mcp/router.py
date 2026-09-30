@@ -25,6 +25,7 @@ Edge = frozenset  # of two orthogonally adjacent cells
 
 DIRS: tuple[Dir, ...] = ((1, 0), (-1, 0), (0, 1), (0, -1))
 SOFT_COST = 8  # stepping onto a soft cell (field text): allowed, discouraged
+NEAR_COST = 2  # a cell touching someone else's pin or wire: wires 1.27 mm apart read as one
 
 
 class Grid:
@@ -36,6 +37,7 @@ class Grid:
         self.blocked: set[Cell] = set()     # part bodies, title block: never entered
         self.forbidden: set[Cell] = set()   # other nets' connection points: never touched
         self.soft: set[Cell] = set()        # text: entered at a cost
+        self.near: set[Cell] = set()        # next to other nets' things: small cost
         self.horizontal: set[Cell] = set()  # interior of a foreign horizontal wire
         self.vertical: set[Cell] = set()    # interior of a foreign vertical wire
 
@@ -115,7 +117,7 @@ def _route(
             heapq.heappush(heap, (g + h(state[0]), next(tie), g, state))
 
     if _enterable(grid, first, exit_dir, goals, arrive, avoid):
-        push((first, exit_dir), 1 + (SOFT_COST if first in grid.soft else 0), None)
+        push((first, exit_dir), 1 + _extra(grid, first), None)
 
     while heap:
         _, _, g, state = heapq.heappop(heap)
@@ -138,9 +140,13 @@ def _route(
             nxt = (cell[0] + d[0], cell[1] + d[1])
             if not _enterable(grid, nxt, d, goals, arrive, avoid):
                 continue
-            step = 1 + (bend_cost if d != heading else 0) + (SOFT_COST if nxt in grid.soft else 0)
+            step = 1 + (bend_cost if d != heading else 0) + _extra(grid, nxt)
             push((nxt, d), g + step, state)
     return None
+
+
+def _extra(grid: Grid, c: Cell) -> int:
+    return (SOFT_COST if c in grid.soft else 0) + (NEAR_COST if c in grid.near else 0)
 
 
 def _enterable(grid: Grid, c: Cell, d: Dir, goals: set[Cell], arrive: dict[Cell, Dir],

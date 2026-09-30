@@ -259,6 +259,12 @@ def _grid(editor: SchematicEditor, index: SymbolIndex, net: _Net) -> Grid:
         for n in sexpr.children(sexpr.child(editor.tree, "lib_symbols") or [], "symbol")
         if len(n) > 1
     }
+    bodies: set[Cell] = set()
+
+    def body(cell: Cell) -> None:
+        grid.block(cell)
+        bodies.add(cell)
+
     for symbol in sexpr.children(editor.tree, "symbol"):
         lib_id = str(sexpr.value(symbol, "lib_id", ""))
         at = sexpr.values(symbol, "at")
@@ -271,8 +277,8 @@ def _grid(editor: SchematicEditor, index: SymbolIndex, net: _Net) -> Grid:
                               mirror=str(mirror) if mirror else None)
         definition = embedded.get(lib_id)
         if definition is not None:
-            body = [placed.to_canvas(px, py) for px, py in _local_points(definition, unit, include_pins=False)]
-            _fill(grid, _bounds(body), grid.block)
+            outline = [placed.to_canvas(px, py) for px, py in _local_points(definition, unit, include_pins=False)]
+            _fill(grid, _bounds(outline), body)
         try:
             pins = [p for p in index.pins(lib_id) if p.unit in (0, unit)]
         except ToolInputError:
@@ -286,7 +292,7 @@ def _grid(editor: SchematicEditor, index: SymbolIndex, net: _Net) -> Grid:
             dx, dy = placed.pin_outward(pin)
             inward = (-round(dx), -round(dy))
             for k in range(1, max(1, round(pin.length / GRID)) + 1):
-                grid.block((point[0] + inward[0] * k, point[1] + inward[1] * k))
+                body((point[0] + inward[0] * k, point[1] + inward[1] * k))
         for prop in sexpr.children(symbol, "property"):
             p_at = sexpr.values(prop, "at")
             if p_at and "(hide yes)" not in sexpr.dumps(prop):
@@ -330,6 +336,15 @@ def _grid(editor: SchematicEditor, index: SymbolIndex, net: _Net) -> Grid:
     for cell in own:
         grid.blocked.discard(cell)
         grid.forbidden.discard(cell)
+
+    # Prefer a cell of clearance around other nets' pins, labels and wires and
+    # around part bodies: wires 1.27 mm apart read as touching when printed.
+    crowded = grid.forbidden | grid.horizontal | grid.vertical | bodies
+    for (cx, cy) in crowded:
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            n = (cx + dx, cy + dy)
+            if n not in crowded and n not in own and grid.inside(n) and n not in grid.blocked:
+                grid.near.add(n)
     return grid
 
 

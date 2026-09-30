@@ -114,3 +114,24 @@ class TestTrees:
         assert edges
         # (7,5) is a tree leaf reached from below, never a through-point.
         assert sum(1 for e in edges if (7, 5) in e) == 1
+
+
+class TestClearance:
+    def test_keeps_a_cell_of_clearance_from_crowded_cells_when_it_can(self):
+        # A long run of "near" cells hugs the straight path; with room to
+        # spare, two bends beat running alongside it the whole way.
+        grid = Grid(40, 12)
+        for x in range(4, 36):
+            grid.near.add((x, 5))
+        edges = route_tree(grid, [(2, 5), (38, 5)], {(2, 5): RIGHT, (38, 5): LEFT})
+        crowded = _cells(edges) & grid.near
+        assert len(crowded) < 5
+
+    def test_clearance_is_a_preference_not_a_wall(self):
+        grid = Grid(20, 3)  # one row only: no way around the near cells
+        for x in range(3, 18):
+            grid.near.add((x, 1))
+        for x in range(20):
+            grid.block((x, 0))
+            grid.block((x, 2))
+        assert route_tree(grid, [(1, 1), (19, 1)], {(1, 1): RIGHT, (19, 1): LEFT}) is not None

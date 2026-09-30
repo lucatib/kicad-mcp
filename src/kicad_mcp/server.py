@@ -29,6 +29,7 @@ from .generator import generate_pinout_schematic
 from .schematic import Schematic, find_project_schematics
 from .session import SESSION, translate
 from .symbols import SymbolIndex
+from . import wiring
 
 mcp = MCPServer(
     name="kicad",
@@ -621,6 +622,32 @@ def set_symbol_fields(
     editor.save()
     result["schematic"] = str(editor.path)
     return result
+
+
+@mcp.tool()
+@tool_result
+def route_nets(
+    path: str,
+    nets: list[str] | None = None,
+    max_length: float | None = None,
+    dry_run: bool = False,
+    project_dir: str | None = None,
+) -> dict:
+    """Replace net labels with drawn wires -- the LAST step, after placement, labelling and ERC are done.
+
+    Routing runs locally in this server; pass only the file. Every signal net
+    connected purely by local labels is wired pin to pin around the parts
+    and keeps one label with its name. Power nets, global/hierarchical labels
+    and hand-drawn wiring are left alone. `nets` limits it to named nets;
+    `max_length` (mm) keeps longer routes as labels. The result is checked
+    with kicad-cli before writing -- identical netlist, no new ERC
+    violations -- and discarded otherwise, leaving the file untouched.
+    `dry_run` runs the same checks without writing.
+    """
+    return wiring.route_and_verify(
+        install(), symbol_index(project_dir), path,
+        nets=nets, max_length=max_length, dry_run=dry_run,
+    )
 
 
 @mcp.tool()
