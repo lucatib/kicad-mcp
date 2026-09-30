@@ -22,12 +22,12 @@ import uuid as uuidlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import cli as kcli
 from . import sexpr
 from .errors import ToolInputError
 from .sexpr import Sym, make
 from .symbols import PinInfo, SymbolIndex
 
-SCH_VERSION = 20250610
 GENERATOR = "kicad-mcp"
 GRID = 1.27
 LABEL_STUB = 5.08  # wire length from pin to label; two grid steps reads cleanly
@@ -120,6 +120,8 @@ class SchematicBuilder:
         self.title = title
         self.rev = rev
         self.company = company
+        #: File format version; callers with an install set the one it writes.
+        self.version = kcli.FALLBACK_SCH_VERSION
         self.uuid = _uuid()
         self._lib_symbols: dict[str, sexpr.SExpr] = {}
         self._symbols: list[sexpr.SExpr] = []
@@ -301,7 +303,7 @@ class SchematicBuilder:
 
         tree: sexpr.SExpr = [
             Sym("kicad_sch"),
-            make("version", SCH_VERSION),
+            make("version", self.version),
             make("generator", GENERATOR),
             make("generator_version", "10.0"),
             make("uuid", self.uuid),
@@ -381,6 +383,8 @@ def generate_pinout_schematic(
         project_name=project_name, paper=paper,
         title=title or f"{mcu_lib_id.split(':')[-1]} pinout",
     )
+    # Match what the installed KiCad writes, or it asks to re-save on open.
+    builder.version = kcli.schematic_format_version(index.install)
 
     all_pins = index.pins(mcu_lib_id)
     if not all_pins:

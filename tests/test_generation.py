@@ -59,7 +59,9 @@ def test_generates_schematic_with_expected_content(index, tmp_path):
     assert out.is_file()
 
     sch = Schematic.load(out)
-    assert sch.version == 20250610
+    from kicad_mcp import cli as kcli
+
+    assert sch.version == kcli.schematic_format_version(index.install)
     labels = {lbl["text"] for lbl in sch.labels()}
     assert {"LED", "BTN"} <= labels
     # The MCU definition must be embedded, or KiCad shows a rescue dialog.
@@ -99,3 +101,33 @@ def test_generated_file_reparses_identically(index, tmp_path):
     generate_pinout_schematic(index, out, MCU, assignments={"IO4": "X"})
     text = out.read_text(encoding="utf-8")
     assert sexpr.dumps(sexpr.parse(text)) == text
+
+
+def test_generated_file_is_already_in_the_installed_kicad_format(index, tmp_path):
+    """KiCad prompts to re-save any file whose format version is older than its own.
+
+    The oracle is KiCad itself: upgrading our output must not change the
+    version number, i.e. there was nothing to upgrade.
+    """
+    import shutil
+
+    from kicad_mcp import cli as kcli
+
+    out = tmp_path / "gen.kicad_sch"
+    generate_pinout_schematic(index, out, MCU, assignments={"IO4": "LED"})
+    ours = Schematic.load(out).version
+
+    upgraded = tmp_path / "upgraded.kicad_sch"
+    shutil.copy(out, upgraded)
+    kcli.run_cli(index.install, ["sch", "upgrade", "--force", str(upgraded)])
+    assert ours == Schematic.load(upgraded).version
+
+
+def test_format_version_falls_back_when_kicad_cli_cannot_run(tmp_path):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from kicad_mcp import cli as kcli
+
+    broken = SimpleNamespace(cli_path=Path(tmp_path / "missing" / "kicad-cli.exe"))
+    assert kcli.schematic_format_version(broken) == kcli.FALLBACK_SCH_VERSION

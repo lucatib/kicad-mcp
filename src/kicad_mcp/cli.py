@@ -8,9 +8,13 @@ and footprints, which is enough to reason about a design without a GUI.
 
 from __future__ import annotations
 
+import re
 import subprocess
+import tempfile
 import xml.etree.ElementTree as ET
+from functools import lru_cache
 from pathlib import Path
+from types import SimpleNamespace
 
 from .errors import CliError, ToolInputError
 
@@ -53,6 +57,47 @@ def run_cli(install, args: list[str], timeout: int = DEFAULT_TIMEOUT) -> dict:
         "stdout": proc.stdout.strip(),
         "stderr": proc.stderr.strip(),
     }
+
+
+#: What KiCad 10.0.6 writes; used only when kicad-cli cannot be asked.
+FALLBACK_SCH_VERSION = 20260306
+
+_MINIMAL_SCH = (
+    '(kicad_sch (version 20231120) (generator "kicad-mcp") '
+    '(uuid "00000000-0000-0000-0000-000000000000") (paper "A4") (lib_symbols) '
+    '(sheet_instances (path "/" (page "1"))))\n'
+)
+
+
+def schematic_format_version(install) -> int:
+    """The `.kicad_sch` format version the installed KiCad writes.
+
+    KiCad asks to re-save any file whose version is older than its own, and
+    point releases bump it (10.0.5 wrote 20250610, 10.0.6 writes 20260306), so
+    a hardcoded number goes stale with every update. Asked of kicad-cli once
+    per install by upgrading a throwaway file -- ~0.3 s -- then cached.
+    """
+    try:
+        stamp = install.cli_path.stat().st_mtime_ns
+    except OSError:
+        return FALLBACK_SCH_VERSION
+    return _format_version_cached(str(install.cli_path), stamp)
+
+
+@lru_cache(maxsize=4)
+def _format_version_cached(cli_path: str, stamp: int) -> int:
+    with tempfile.TemporaryDirectory(prefix="kicad-mcp-") as tmp:
+        probe = Path(tmp) / "probe.kicad_sch"
+        probe.write_text(_MINIMAL_SCH, encoding="utf-8")
+        try:
+            result = run_cli(SimpleNamespace(cli_path=Path(cli_path)),
+                             ["sch", "upgrade", "--force", str(probe)], timeout=60)
+        except CliError:
+            return FALLBACK_SCH_VERSION
+        match = re.search(r"\(version (\d+)\)", probe.read_text(encoding="utf-8"))
+    if result["returncode"] != 0 or not match:
+        return FALLBACK_SCH_VERSION
+    return int(match.group(1))
 
 
 def _require_file(path: str | Path, suffix: str) -> Path:
