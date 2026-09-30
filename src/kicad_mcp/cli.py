@@ -35,6 +35,9 @@ def run_cli(install, args: list[str], timeout: int = DEFAULT_TIMEOUT) -> dict:
             # which has no OS handle a child process can duplicate. Same failure
             # mode as running under pytest's captured stdin -- WinError 6.
             stdin=subprocess.DEVNULL,
+            # Clients launch the server without a console, so Windows would
+            # give kicad-cli a fresh visible one -- stealing focus every call.
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
     except subprocess.TimeoutExpired as exc:
         raise CliError(
