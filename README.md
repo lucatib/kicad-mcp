@@ -93,7 +93,10 @@ To wire a symbol that is already on the sheet, `label_pins` takes the same
 connected, so an existing net is never shorted to a new one.
 
 New symbols are placed in the first free spot on the page: right of existing
-parts, wrapping to a new row, never over the title block. A full sheet is
+parts, wrapping to a new row, never over the title block. When the nets in
+`assignments` already exist on the sheet, the part goes beside the pins it
+connects to instead, on the side they face, lined up with them and flipped if
+that turns its pins toward them, so the wires `route_nets` draws stay short. A full sheet is
 refused rather than drawn off-page; pass `x`/`y` to place explicitly. Footprints
 written by `add_symbol_to_schematic` or `set_symbol_fields` are checked against
 the project's `fp-lib-table`, and one that will not resolve is reported with the

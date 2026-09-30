@@ -142,20 +142,124 @@ class SchematicEditor:
         drawing area, off the title block, and clear of every symbol, wire,
         label and sheet by at least half of PLACE_MARGIN.
         """
+        rel, fits, anchors = self._fitter(index, lib_id, inflate)
+        for _, y, x in sorted(self._candidates(rel, anchors)):
+            if fits(x, y):
+                return x, y
+        raise self._no_room(lib_id)
+
+    def connected_spot(
+        self,
+        index: SymbolIndex,
+        lib_id: str,
+        links: list[tuple[PinInfo, list[tuple[tuple[float, float], tuple[int, int] | None]]]],
+        inflate: float = 0.0,
+    ) -> tuple[float, float, str | None]:
+        """Origin and mirroring for `lib_id` that keep its wires short.
+
+        `links` pairs each of the new part's pins with the points it will
+        connect to already on the sheet, and the direction each of those pins
+        faces. Both orientations -- as drawn, and flipped left/right -- are
+        tried, at the ordinary free spots plus spots beside the partners
+        lined up with them. The winner is the one with the least estimated
+        wire, where a pin facing away from its partner counts as a detour
+        around the part. The same page rules as `free_spot` apply.
+        """
+        best: tuple[float, int, float, float, str | None] | None = None
+        partners = [pt for _, ps in links for pt, _ in ps]
+        pxs, pys = [p[0] for p in partners], [p[1] for p in partners]
+        for mirror in (None, "y"):
+            rel, fits, anchors = self._fitter(index, lib_id, inflate, mirror)
+            probe = PlacedSymbol("", "", lib_id, x=0.0, y=0.0, angle=0.0, unit=1, uuid="", mirror=mirror)
+            pins = [(probe.pin_point(p), probe.pin_outward(p), ps) for p, ps in links]
+            y0 = sum(pys) / len(pys) - sum(pt[1] for pt, _, _ in pins) / len(pins)
+            candidates = self._candidates(rel, anchors)
+            for extra in (0.0, 12.7, 25.4, 38.1, 50.8, 76.2):
+                for k in range(-15, 16):
+                    y = _snap_up(y0 + k * GRID * 2)
+                    candidates.append((1, y, _snap_up(min(pxs) - PLACE_MARGIN - extra - rel[2])))
+                    candidates.append((1, y, _snap_up(max(pxs) + PLACE_MARGIN + extra - rel[0])))
+            for tier, y, x in candidates:
+                if not fits(x, y):
+                    continue
+                key = (_wire_cost(pins, x, y), tier, y, x, mirror)
+                if best is None or key[:4] < best[:4]:
+                    best = key
+        if best is None:
+            raise self._no_room(lib_id)
+        _, _, y, x, mirror = best
+        return x, y, mirror
+
+    def partner_pins(
+        self, index: SymbolIndex, nets: set[str]
+    ) -> dict[str, list[tuple[tuple[float, float], tuple[int, int] | None]]]:
+        """Where each named net already touches a pin, and which way that pin faces.
+
+        Found through its labels: a label on a pin, or at the far end of a
+        stub wire from one. A label reaching no pin still counts, as a point
+        with no direction -- being near it is still better than not.
+        """
+        pins: dict[tuple[float, float], tuple[int, int]] = {}
+        for ref in self.references():
+            try:
+                units = self.placements(index, ref)
+            except ToolInputError:
+                continue
+            for sym in units:
+                for pin in sym.pins:
+                    dx, dy = sym.pin_outward(pin)
+                    pins[_key(sym.pin_point(pin))] = (round(dx), round(dy))
+        ends: dict[tuple[float, float], list[tuple[float, float]]] = {}
+        for wire in sexpr.children(self.tree, "wire"):
+            pts = [(float(xy[1]), float(xy[2]))
+                   for xy in sexpr.children(sexpr.child(wire, "pts") or [], "xy")]
+            if len(pts) == 2:
+                ends.setdefault(_key(pts[0]), []).append(pts[1])
+                ends.setdefault(_key(pts[1]), []).append(pts[0])
+
+        out: dict[str, list] = {}
+        for kind in ("label", "global_label", "hierarchical_label"):
+            for label in sexpr.children(self.tree, kind):
+                name = str(label[1]) if len(label) > 1 else ""
+                at = sexpr.values(label, "at")
+                if name not in nets or not at:
+                    continue
+                point = (float(at[0]), float(at[1]))
+                if _key(point) in pins:
+                    hit = (point, pins[_key(point)])
+                else:
+                    hit = next(
+                        ((far, pins[_key(far)]) for far in ends.get(_key(point), [])
+                         if _key(far) in pins),
+                        (point, None),
+                    )
+                out.setdefault(name, []).append(hit)
+        return out
+
+    def _fitter(self, index: SymbolIndex, lib_id: str, inflate: float, mirror: str | None = None):
+        """(relative box, fits(x, y), anchors) for placing `lib_id` on this sheet."""
         rl, rt, rr, rb = _relative_box(index, lib_id)
-        rl, rt, rr, rb = rl - inflate, rt - inflate, rr + inflate, rb + inflate
+        if mirror == "y":
+            rl, rr = -rr, -rl
+        rel = (rl - inflate, rt - inflate, rr + inflate, rb + inflate)
         area = self.drawing_area()
         anchors, blockers = self._obstacles(index)
         blockers.append(self.title_block())
         gap = PLACE_MARGIN / 2
 
         def fits(x: float, y: float) -> bool:
-            box = (x + rl, y + rt, x + rr, y + rb)
+            box = (x + rel[0], y + rel[1], x + rel[2], y + rel[3])
             if not _inside(box, area):
                 return False
             grown = (box[0] - gap, box[1] - gap, box[2] + gap, box[3] + gap)
             return not any(_intersects(grown, b) for b in blockers)
 
+        return rel, fits, anchors
+
+    def _candidates(self, rel: Box, anchors) -> list[tuple[int, float, float]]:
+        """free_spot's spots as (tier, y, x): lower tiers are preferred."""
+        rl, rt = rel[0], rel[1]
+        area = self.drawing_area()
         candidates: list[tuple[int, float, float]] = []
         if not anchors:
             candidates.append((0, 101.6, 190.5))  # the historical default spot
@@ -168,12 +272,11 @@ class SchematicEditor:
             # Last resort, before calling the sheet full: the strip above.
             candidates.append((2, area[1] + PLACE_MARGIN - rt, box[0] - rl))
             candidates.append((2, area[1] + PLACE_MARGIN - rt, area[0] + PLACE_MARGIN - rl))
-        for _, y, x in sorted((tier, _snap_up(y), _snap_up(x)) for tier, y, x in candidates):
-            if fits(x, y):
-                return x, y
+        return [(tier, _snap_up(y), _snap_up(x)) for tier, y, x in candidates]
 
+    def _no_room(self, lib_id: str) -> ToolInputError:
         w, h = self.page_size()
-        raise ToolInputError(
+        return ToolInputError(
             f"No room for {lib_id} on the {w:g}x{h:g} mm sheet of {self.path.name}: every "
             "free spot would leave the page, cover the title block, or touch existing content.",
             remedy="Enlarge the sheet in KiCad (File > Page Settings, e.g. A3 or A2), "
@@ -363,6 +466,7 @@ class SchematicEditor:
         prefix = "".join(c for c in lib_id.split(":")[-1] if c.isalpha())[:1] or "U"
         reference = reference or self.next_reference(prefix)
         value = value if value is not None else lib_id.split(":")[-1]
+        mirror = None
         if at:
             x, y = _snap(at[0]), _snap(at[1])
             warnings = self.placement_warnings(index, lib_id, x, y)
@@ -370,11 +474,16 @@ class SchematicEditor:
             # Room for the labels about to hang off its pins, not just the body.
             longest = max((len(str(net)) for net in assignments.values()), default=0)
             inflate = LABEL_STUB + longest * 1.27 if assignments else 0.0
-            x, y = self.free_spot(index, lib_id, inflate=inflate)
+            links = self._links(index, lib_id, assignments)
+            if links:
+                x, y, mirror = self.connected_spot(index, lib_id, links, inflate=inflate)
+            else:
+                x, y = self.free_spot(index, lib_id, inflate=inflate)
             warnings = []
 
         builder = self._builder()
-        placed = builder.add_symbol(index, lib_id, reference, value, x=x, y=y, footprint=footprint)
+        placed = builder.add_symbol(index, lib_id, reference, value, x=x, y=y,
+                                    footprint=footprint, mirror=mirror)
 
         matched, unmatched = _match_pins([placed], assignments)
         connected = []
@@ -388,6 +497,7 @@ class SchematicEditor:
             "lib_id": lib_id,
             "position": {"x": x, "y": y},
             "footprint": placed.footprint,
+            "mirrored": mirror is not None,
             "warnings": warnings,
             "connected": connected,
             "unmatched_assignments": unmatched,
@@ -556,6 +666,16 @@ class SchematicEditor:
             except ToolInputError:
                 continue  # a symbol whose library is gone still can't be labelled over
         return points
+
+    def _links(self, index: SymbolIndex, lib_id: str, assignments: dict[str, str]):
+        """The new part's assigned pins, each with where its net already is."""
+        if not assignments:
+            return []
+        probe = PlacedSymbol("", "", lib_id, x=0.0, y=0.0, angle=0.0, unit=1, uuid="",
+                             pins=[p for p in index.pins(lib_id) if p.unit in (0, 1)])
+        matched, _ = _match_pins([probe], assignments)
+        partners = self.partner_pins(index, {net for _, _, net in matched})
+        return [(pin, partners[net]) for _, pin, net in matched if net in partners]
 
     def swap_power_symbol(self, index: SymbolIndex, old_lib_id: str, new_lib_id: str) -> int:
         """Repoint power symbols from one rail to another.
@@ -807,6 +927,29 @@ def _text_box(x: float, y: float, angle: float, text: str, size: float = 1.27) -
     direction = {0: (1, 0), 90: (0, -1), 180: (-1, 0), 270: (0, 1)}.get(int(angle) % 360, (1, 0))
     end = (x + direction[0] * length, y + direction[1] * length)
     return _grow(_bounds([(x, y), end]), size)
+
+
+#: A pin facing away from what it connects to: the wire has to go around the part.
+FACING_PENALTY = 100.0
+
+
+def _wire_cost(pins, x: float, y: float) -> float:
+    """Estimated wire for a candidate origin: Manhattan distance, plus detours.
+
+    `pins` holds, per connected pin of the new part, its offset from the
+    origin, the direction it faces, and its partners' (point, direction).
+    """
+    total = 0.0
+    for (px, py), (ox, oy), partners in pins:
+        ax, ay = x + px, y + py
+        (bx, by), facing = min(partners, key=lambda p: abs(p[0][0] - ax) + abs(p[0][1] - ay))
+        vx, vy = bx - ax, by - ay
+        total += abs(vx) + abs(vy)
+        if ox * vx + oy * vy < 0:
+            total += FACING_PENALTY
+        if facing is not None and facing[0] * -vx + facing[1] * -vy < 0:
+            total += FACING_PENALTY
+    return total
 
 
 def _snap_up(v: float) -> float:

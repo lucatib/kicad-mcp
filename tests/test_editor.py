@@ -516,3 +516,66 @@ class TestPageSize:
 
         editor = SchematicEditor(tmp_path / "x.kicad_sch", sexpr.parse(f"(kicad_sch {paper})"))
         assert editor.page_size() == expected
+
+
+# --- connection-aware placement --------------------------------------------
+
+
+def _pin_outward(editor, index, ref, number):
+    sym, = editor.placements(index, ref)
+    pin = next(p for p in sym.pins if p.number == number)
+    return sym.pin_outward(pin), sym.pin_point(pin)
+
+
+class TestConnectionAwarePlacement:
+    """IO4 sits on U1's left edge; IO21 on its right (ESP32-S3-MINI-1)."""
+
+    def test_goes_on_the_side_its_partners_face(self, index, base_sch):
+        editor = SchematicEditor.load(base_sch)
+        res = editor.place_symbol(index, CONN, {"1": "LED"}, reference="J1")
+        assert res["position"]["x"] < editor.placement("U1")[1]
+
+    def test_mirrors_so_its_connected_pin_faces_the_partner(self, index, base_sch):
+        editor = SchematicEditor.load(base_sch)
+        editor.place_symbol(index, CONN, {"1": "LED"}, reference="J1")
+        (dx, _), _ = _pin_outward(editor, index, "J1", "1")
+        assert dx > 0, "J1 sits left of U1, so its pin must face right, toward U1"
+
+    def test_not_mirrored_when_already_facing_the_partner(self, index, base_sch):
+        editor = SchematicEditor.load(base_sch)
+        editor.label_pins(index, "U1", {"IO21": "RIGHTNET"})
+        res = editor.place_symbol(index, CONN, {"1": "RIGHTNET"}, reference="J1")
+        assert res["position"]["x"] > editor.placement("U1")[1]
+        assert res["mirrored"] is False
+        (dx, _), _ = _pin_outward(editor, index, "J1", "1")
+        assert dx < 0
+
+    def test_lines_up_with_the_partner_pins(self, index, base_sch):
+        editor = SchematicEditor.load(base_sch)
+        editor.place_symbol(index, CONN, {"1": "LED"}, reference="J1")
+        _, (_, j1_y) = _pin_outward(editor, index, "J1", "1")
+        _, (_, u1_y) = _pin_outward(editor, index, "U1", "8")  # IO4
+        assert abs(j1_y - u1_y) <= 5.08
+
+    def test_unknown_nets_place_exactly_as_before(self, index, base_sch):
+        editor = SchematicEditor.load(base_sch)
+        longest = len("BRAND_NEW")
+        expected = editor.free_spot(index, CONN, inflate=5.08 + longest * 1.27)
+        res = editor.place_symbol(index, CONN, {"1": "BRAND_NEW"}, reference="J1")
+        assert (res["position"]["x"], res["position"]["y"]) == expected
+        assert res["mirrored"] is False
+
+    def test_page_rules_still_hold(self, index, a4_sch):
+        editor = SchematicEditor.load(a4_sch)
+        for i in range(6):
+            editor.place_symbol(index, CONN, {"1": "LED"}, reference=f"J{i + 1}")
+        editor.save()
+        boxes = _pin_boxes(SchematicEditor.load(a4_sch), index)
+        for ref, (x0, y0, x1, y1) in boxes.items():
+            assert INSET <= x0 and x1 <= A4[0] - INSET, f"{ref} off the page"
+            assert INSET <= y0 and y1 <= A4[1] - INSET, f"{ref} off the page"
+            assert not _intersects((x0, y0, x1, y1), TITLE_BLOCK), f"{ref} on the title block"
+        refs = [r for r in boxes if not r.startswith("#")]
+        for i, a in enumerate(refs):
+            for b in refs[i + 1:]:
+                assert not _intersects(boxes[a], boxes[b]), f"{a} overlaps {b}"

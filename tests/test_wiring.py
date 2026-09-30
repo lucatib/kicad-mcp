@@ -283,3 +283,38 @@ class TestVerifiedTool:
         assert res["written"] is False
         assert res["routed"] == []
         assert sch.read_bytes() == before
+
+
+class TestPlacementPlusRouting:
+    def test_connected_parts_route_without_looping_around_the_mcu(self, install, index, tmp_path):
+        """The demo that motivated connection-aware placement.
+
+        With every part dropped to the right of the MCU, nets from its left
+        edge looped the whole chip: ~1060 mm of wire for 7 two-pin nets.
+        Now each route may detour at most one inch beyond the straight
+        Manhattan distance between its two pins.
+        """
+        from kicad_mcp import server
+
+        sch = tmp_path / "demo.kicad_sch"
+        nets = {"IO10": "CC_CSN", "IO11": "CC_MOSI", "IO12": "CC_SCK", "IO13": "CC_MISO",
+                "IO14": "CC_GDO0", "IO4": "RELAY_UP", "IO5": "RELAY_DOWN"}
+        generate_pinout_schematic(index, sch, MCU, nets, paper="A4")
+        server.add_symbol_to_schematic(str(sch), "Connector_Generic:Conn_01x08",
+                                       {"3": "CC_GDO0", "4": "CC_CSN", "5": "CC_SCK",
+                                        "6": "CC_MOSI", "7": "CC_MISO"}, reference="J1")
+        server.add_symbol_to_schematic(str(sch), "Connector_Generic:Conn_01x04",
+                                       {"3": "RELAY_UP", "4": "RELAY_DOWN"}, reference="J2")
+        editor = SchematicEditor.load(sch)
+        pins = wiring._pin_table(editor, index)
+        before = _netlist(install, sch)
+
+        res = server.route_nets(str(sch))
+
+        assert res["written"] is True, res
+        assert len(res["routed"]) == 7
+        by_name = {n["name"]: n["nodes"] for n in before["nets"]}
+        for r in res["routed"]:
+            a, b = (pins[n["reference"]][n["pin"]][0] for n in by_name["/" + r["net"]])
+            straight = abs(a[0] - b[0]) + abs(a[1] - b[1])
+            assert r["length_mm"] <= straight + 25.4, f"{r['net']} loops: {r['length_mm']} vs {straight:.1f}"

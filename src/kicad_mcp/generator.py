@@ -137,8 +137,10 @@ class SchematicBuilder:
     def add_symbol(self, index: SymbolIndex, lib_id: str, reference: str, value: str,
                    x: float, y: float, angle: float = 0, unit: int = 1,
                    footprint: str = "", hide_value: bool = False,
-                   hide_reference: bool = False) -> PlacedSymbol:
+                   hide_reference: bool = False, mirror: str | None = None) -> PlacedSymbol:
         """Place a symbol, embedding its library definition on first use.
+
+        `mirror` is KiCad's "x" (flip top/bottom) or "y" (flip left/right).
 
         A `.kicad_sch` does not resolve libraries at load time -- it carries its
         own copy of each symbol -- so the definition must be embedded or KiCad
@@ -155,7 +157,7 @@ class SchematicBuilder:
         placed = PlacedSymbol(
             reference=reference, value=value, lib_id=lib_id,
             x=_snap(x), y=_snap(y), angle=angle, unit=unit,
-            uuid=_uuid(), footprint=footprint, pins=pins,
+            uuid=_uuid(), footprint=footprint, pins=pins, mirror=mirror,
         )
         self.placed.append(placed)
 
@@ -164,6 +166,7 @@ class SchematicBuilder:
             Sym("symbol"),
             make("lib_id", lib_id),
             make("at", placed.x, placed.y, angle),
+            *([make("mirror", Sym(mirror))] if mirror else []),
             make("unit", unit),
             make("exclude_from_sim", Sym("no")),
             make("in_bom", Sym("yes")),
