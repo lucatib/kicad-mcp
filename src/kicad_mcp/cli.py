@@ -8,6 +8,7 @@ and footprints, which is enough to reason about a design without a GUI.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import tempfile
@@ -196,6 +197,20 @@ def run_erc(install, schematic: str | Path, output: str | Path | None = None,
         except OSError:  # pragma: no cover
             pass
     return result
+
+
+def erc_violation_count(install, schematic: str | Path) -> int:
+    """Total ERC violations across all sheets, from kicad-cli's JSON report."""
+    src = _require_file(schematic, ".kicad_sch")
+    out = src.with_suffix(".erc.json")
+    result = run_cli(install, ["sch", "erc", "--format", "json", "-o", str(out), str(src)])
+    try:
+        report = json.loads(out.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise CliError(
+            f"ERC produced no readable report for {src.name}: {result.get('stderr') or exc}"
+        ) from exc
+    return sum(len(sheet.get("violations", [])) for sheet in report.get("sheets", []))
 
 
 def export_bom(install, schematic: str | Path, output: str | Path | None = None) -> dict:

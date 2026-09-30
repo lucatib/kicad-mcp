@@ -732,12 +732,14 @@ class SchematicEditor:
         return self.path
 
 
-def _local_points(node: sexpr.SExpr, unit: int | None = None) -> list[tuple[float, float]]:
+def _local_points(node: sexpr.SExpr, unit: int | None = None,
+                  include_pins: bool = True) -> list[tuple[float, float]]:
     """Every drawn point of a symbol definition, in its library (Y-up) frame.
 
     Body graphics and pin connection points; a pin's `at` is its outer end, so
-    pins need nothing extra. With `unit`, only that unit's graphics and the
-    shared (unit 0) ones -- a multi-unit part's units are placed separately.
+    pins need nothing extra; `include_pins=False` gives the body alone. With
+    `unit`, only that unit's graphics and the shared (unit 0) ones -- a
+    multi-unit part's units are placed separately.
     """
     pts: list[tuple[float, float]] = []
     for sub in sexpr.children(node, "symbol"):
@@ -762,7 +764,7 @@ def _local_points(node: sexpr.SExpr, unit: int | None = None) -> list[tuple[floa
                 v = sexpr.values(arc, key)
                 if v:
                     pts.append((float(v[0]), float(v[1])))
-        for pin in sexpr.children(sub, "pin"):
+        for pin in sexpr.children(sub, "pin") if include_pins else ():
             v = sexpr.values(pin, "at")
             if v:
                 pts.append((float(v[0]), float(v[1])))
