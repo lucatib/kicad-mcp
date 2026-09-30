@@ -12,11 +12,14 @@ document.
 
 from __future__ import annotations
 
+import math
+import re
 from pathlib import Path
 
 from . import sexpr
 from .errors import ToolInputError
-from .generator import GRID, PlacedSymbol, SchematicBuilder, _normalise_key, _snap
+from .footprints import FootprintIndex, footprint_warning
+from .generator import GRID, LABEL_STUB, PlacedSymbol, SchematicBuilder, _normalise_key, _property, _snap
 from .schematic import Schematic
 from .sexpr import Sym
 from .symbols import PinInfo, SymbolIndex
@@ -24,6 +27,26 @@ from .symbols import PinInfo, SymbolIndex
 #: Where a two-pin part's pins sit relative to its centre, for Device:C and
 #: friends: pin 1 above, pin 2 below, both on the 1.27 mm grid.
 STUB = 2.54
+
+#: Landscape paper sizes in mm, under the names `(paper ...)` uses.
+PAPER_MM = {
+    "A5": (210.0, 148.0), "A4": (297.0, 210.0), "A3": (420.0, 297.0),
+    "A2": (594.0, 420.0), "A1": (841.0, 594.0), "A0": (1189.0, 841.0),
+    "A": (279.4, 215.9), "B": (431.8, 279.4), "C": (558.8, 431.8),
+    "D": (863.6, 558.8), "E": (1117.6, 863.6),
+    "USLetter": (279.4, 215.9), "USLegal": (355.6, 215.9), "USLedger": (431.8, 279.4),
+}
+#: From KiCad's pagelayout_default.kicad_wks: 10 mm page margins, then a 2 mm
+#: band of border coordinates, then the drawing area.
+PAGE_MARGIN = 10.0
+PAGE_INSET = 12.0
+#: The title block's outer rectangle, measured from the margin's bottom-right
+#: corner (the layout's `start 110 34`); its inner 2 mm is the border band.
+TITLE_BLOCK = (110.0, 34.0)
+#: Clearance kept between a newly placed symbol and anything already drawn.
+PLACE_MARGIN = 12.7
+
+Box = tuple[float, float, float, float]  # x0, y0, x1, y1 in canvas mm
 
 
 class SchematicEditor:
@@ -83,49 +106,165 @@ class SchematicEditor:
             n += 1
         return f"{prefix}{n}"
 
-    def half_width(self, index: SymbolIndex, lib_id: str) -> float:
-        """Half-width of a symbol's body+pins, in millimetres from its origin.
+    # --- page and placement ---------------------------------------------
 
-        Measured from the body rectangle and every pin's local x, not assumed.
-        Board-level symbols especially vary wildly in size -- ESP32-DevKitC
-        spans +-33mm, Device:C spans about +-4mm -- so a fixed offset that
-        works for one overlaps badly with the other.
+    def page_size(self) -> tuple[float, float]:
+        """Paper width and height in mm, from `(paper ...)`; A4 if absent."""
+        vals = sexpr.values(self.tree, "paper")
+        name = sexpr.as_text(vals[0]) if vals else "A4"
+        if name == "User" and len(vals) >= 3:
+            w, h = float(vals[1]), float(vals[2])
+        else:
+            w, h = PAPER_MM.get(name, PAPER_MM["A4"])
+        if any(sexpr.as_text(v) == "portrait" for v in vals[1:]):
+            w, h = h, w
+        return w, h
+
+    def drawing_area(self) -> Box:
+        w, h = self.page_size()
+        return (PAGE_INSET, PAGE_INSET, w - PAGE_INSET, h - PAGE_INSET)
+
+    def title_block(self) -> Box:
+        w, h = self.page_size()
+        right, bottom = w - PAGE_MARGIN, h - PAGE_MARGIN
+        return (right - TITLE_BLOCK[0], bottom - TITLE_BLOCK[1], right - 2, bottom - 2)
+
+    def free_spot(self, index: SymbolIndex, lib_id: str, inflate: float = 0.0) -> tuple[float, float]:
+        """An on-page origin for `lib_id` that clears everything already drawn.
+
+        Tries, in order: right of existing content, row by row from the top
+        (so parts extend the row they belong with); then under existing
+        content, either stacked below a part or starting a new row at the
+        left edge, whichever is higher on the sheet; and only then the free
+        strip along the top, before calling the sheet full. Each candidate's whole
+        box -- body, pins, reference/value text, plus `inflate` for labels or
+        rails the caller is about to hang off it -- must fit inside the
+        drawing area, off the title block, and clear of every symbol, wire,
+        label and sheet by at least half of PLACE_MARGIN.
         """
-        try:
-            node = index.definition(lib_id)
-        except ToolInputError:
-            return 12.7  # unknown part: a conservative guess, not a silent 0
-        xs = [0.0]
-        for sub in sexpr.children(node, "symbol"):
-            for rect in sexpr.children(sub, "rectangle"):
-                for pt in (sexpr.values(rect, "start"), sexpr.values(rect, "end")):
-                    if pt:
-                        xs.append(abs(float(pt[0])))
-            for pin in sexpr.children(sub, "pin"):
-                at = sexpr.values(pin, "at")
-                if at:
-                    xs.append(abs(float(at[0])))
-        return max(xs)
+        rl, rt, rr, rb = _relative_box(index, lib_id)
+        rl, rt, rr, rb = rl - inflate, rt - inflate, rr + inflate, rb + inflate
+        area = self.drawing_area()
+        anchors, blockers = self._obstacles(index)
+        blockers.append(self.title_block())
+        gap = PLACE_MARGIN / 2
 
-    def free_x(self, index: SymbolIndex, lib_id: str, margin: float = 12.7,
-               default: float = 190.5) -> float:
-        """A centre x where placing `lib_id` will not overlap anything present.
+        def fits(x: float, y: float) -> bool:
+            box = (x + rl, y + rt, x + rr, y + rb)
+            if not _inside(box, area):
+                return False
+            grown = (box[0] - gap, box[1] - gap, box[2] + gap, box[3] + gap)
+            return not any(_intersects(grown, b) for b in blockers)
 
-        Takes the real half-width of every already-placed symbol (not just its
-        centre coordinate) to find the current right-hand edge, then clears it
-        by `margin` plus the new symbol's own half-width.
-        """
-        new_half = self.half_width(index, lib_id)
-        edges = []
+        candidates: list[tuple[int, float, float]] = []
+        if not anchors:
+            candidates.append((0, 101.6, 190.5))  # the historical default spot
+            candidates.append((1, area[1] + PLACE_MARGIN - rt, area[0] + PLACE_MARGIN - rl))
+        for box, anchor_y in anchors:
+            candidates.append((0, anchor_y, box[2] + PLACE_MARGIN - rl))
+            below = box[3] + PLACE_MARGIN - rt
+            candidates.append((1, below, area[0] + PLACE_MARGIN - rl))  # new row, left edge
+            candidates.append((1, below, box[0] - rl))  # stacked under this one
+            # Last resort, before calling the sheet full: the strip above.
+            candidates.append((2, area[1] + PLACE_MARGIN - rt, box[0] - rl))
+            candidates.append((2, area[1] + PLACE_MARGIN - rt, area[0] + PLACE_MARGIN - rl))
+        for _, y, x in sorted((tier, _snap_up(y), _snap_up(x)) for tier, y, x in candidates):
+            if fits(x, y):
+                return x, y
+
+        w, h = self.page_size()
+        raise ToolInputError(
+            f"No room for {lib_id} on the {w:g}x{h:g} mm sheet of {self.path.name}: every "
+            "free spot would leave the page, cover the title block, or touch existing content.",
+            remedy="Enlarge the sheet in KiCad (File > Page Settings, e.g. A3 or A2), "
+                   "or pass explicit x/y coordinates.",
+        )
+
+    def placement_warnings(self, index: SymbolIndex, lib_id: str, x: float, y: float) -> list[str]:
+        """Why an explicitly chosen position is a bad one, if it is."""
+        rl, rt, rr, rb = _relative_box(index, lib_id)
+        box = (x + rl, y + rt, x + rr, y + rb)
+        out = []
+        if not _inside(box, self.drawing_area()):
+            w, h = self.page_size()
+            out.append(f"{lib_id} at ({x:g}, {y:g}) extends past the {w:g}x{h:g} mm drawing area.")
+        if _intersects(box, self.title_block()):
+            out.append(f"{lib_id} at ({x:g}, {y:g}) overlaps the title block.")
+        return out
+
+    def _obstacles(self, index: SymbolIndex) -> tuple[list[tuple[Box, float]], list[Box]]:
+        """(symbol boxes with their origin y, every box that blocks placement)."""
+        anchors: list[tuple[Box, float]] = []
+        blockers: list[Box] = []
+        points_cache: dict[tuple[str, int], list[tuple[float, float]]] = {}
+        # The copies embedded in the file are what KiCad actually draws, and
+        # they survive the source library being renamed or removed.
+        embedded = {
+            str(n[1]): n
+            for n in sexpr.children(sexpr.child(self.tree, "lib_symbols") or [], "symbol")
+            if len(n) > 1
+        }
+
         for symbol in sexpr.children(self.tree, "symbol"):
+            lib_id = str(sexpr.value(symbol, "lib_id", ""))
             at = sexpr.values(symbol, "at")
-            existing_lib = sexpr.value(symbol, "lib_id")
-            if not at or not existing_lib:
+            if not lib_id or not at:
                 continue
-            edges.append(float(at[0]) + self.half_width(index, str(existing_lib)))
-        if not edges:
-            return default
-        return _snap(max(edges) + margin + new_half)
+            unit = int(sexpr.value(symbol, "unit", 1) or 1)
+            if (lib_id, unit) not in points_cache:
+                definition = embedded.get(lib_id)
+                if definition is None:
+                    try:
+                        definition = index.definition(lib_id)
+                    except ToolInputError:
+                        definition = None
+                points_cache[lib_id, unit] = (
+                    _local_points(definition, unit) if definition is not None
+                    # Unknown shape: claim a generous square rather than nothing.
+                    else [(-PLACE_MARGIN, -PLACE_MARGIN), (PLACE_MARGIN, PLACE_MARGIN)]
+                )
+            mirror = sexpr.value(symbol, "mirror")
+            placed = PlacedSymbol(
+                "", "", lib_id, x=float(at[0]), y=float(at[1]),
+                angle=float(at[2]) if len(at) > 2 else 0.0, unit=unit, uuid="",
+                mirror=str(mirror) if mirror else None,
+            )
+            pts = [placed.to_canvas(px, py) for px, py in points_cache[lib_id, unit]]
+            # Visible fields (reference, value) are part of what a reader sees.
+            for prop in sexpr.children(symbol, "property"):
+                p_at = sexpr.values(prop, "at")
+                if p_at and "(hide yes)" not in sexpr.dumps(prop):
+                    pts.append((float(p_at[0]), float(p_at[1])))
+            box = _bounds(pts)
+            blockers.append(box)
+            anchors.append((box, placed.y))
+
+        for wire in sexpr.children(self.tree, "wire"):
+            pts_node = sexpr.child(wire, "pts")
+            pts = [(float(xy[1]), float(xy[2])) for xy in sexpr.children(pts_node or [], "xy")]
+            if pts:
+                blockers.append(_grow(_bounds(pts), 0.5))
+        for kind in ("label", "global_label", "hierarchical_label", "text"):
+            for node in sexpr.children(self.tree, kind):
+                at = sexpr.values(node, "at")
+                if not at:
+                    continue
+                text = str(node[1]) if len(node) > 1 else ""
+                blockers.append(_text_box(float(at[0]), float(at[1]),
+                                          float(at[2]) if len(at) > 2 else 0.0, text))
+        for kind in ("junction", "no_connect"):
+            for node in sexpr.children(self.tree, kind):
+                at = sexpr.values(node, "at")
+                if at:
+                    blockers.append(_grow(_bounds([(float(at[0]), float(at[1]))]), 1.0))
+        for sheet in sexpr.children(self.tree, "sheet"):
+            at, size = sexpr.values(sheet, "at"), sexpr.values(sheet, "size")
+            if at and size:
+                x, y = float(at[0]), float(at[1])
+                box = (x, y, x + float(size[0]), y + float(size[1]))
+                blockers.append(box)
+                anchors.append((box, y))
+        return anchors, blockers
 
     def placement(self, reference: str) -> tuple[str, float, float, float]:
         """The lib_id and (x, y, angle) of an already-placed symbol.
@@ -224,8 +363,15 @@ class SchematicEditor:
         prefix = "".join(c for c in lib_id.split(":")[-1] if c.isalpha())[:1] or "U"
         reference = reference or self.next_reference(prefix)
         value = value if value is not None else lib_id.split(":")[-1]
-        x, y = at if at else (self.free_x(index, lib_id), 101.6)
-        x, y = _snap(x), _snap(y)
+        if at:
+            x, y = _snap(at[0]), _snap(at[1])
+            warnings = self.placement_warnings(index, lib_id, x, y)
+        else:
+            # Room for the labels about to hang off its pins, not just the body.
+            longest = max((len(str(net)) for net in assignments.values()), default=0)
+            inflate = LABEL_STUB + longest * 1.27 if assignments else 0.0
+            x, y = self.free_spot(index, lib_id, inflate=inflate)
+            warnings = []
 
         builder = self._builder()
         placed = builder.add_symbol(index, lib_id, reference, value, x=x, y=y, footprint=footprint)
@@ -242,6 +388,7 @@ class SchematicEditor:
             "lib_id": lib_id,
             "position": {"x": x, "y": y},
             "footprint": placed.footprint,
+            "warnings": warnings,
             "connected": connected,
             "unmatched_assignments": unmatched,
             "available_pin_names": [p.name for p in placed.pins][:200],
@@ -285,6 +432,73 @@ class SchematicEditor:
             "already_connected": skipped,
             "unmatched_assignments": unmatched,
             "available_pin_names": [p.name for s in placed for p in s.pins][:200],
+        }
+
+    def set_fields(
+        self,
+        reference: str,
+        fields: dict[str, str],
+        footprints: FootprintIndex | None = None,
+    ) -> dict:
+        """Set fields of a placed symbol: Value, Footprint, Datasheet, or any custom one.
+
+        Applied to every unit of a multi-unit symbol, since KiCad expects the
+        units of one part to agree. A field the symbol lacks is added hidden.
+        Renaming `Reference` also rewrites the `instances` block -- KiCad
+        annotates from there, so changing only the visible field would revert
+        on the next annotation. With `footprints`, a Footprint that does not
+        resolve is still written (the library may be registered later) but
+        reported, naming the same footprint under a library that does resolve.
+        """
+        nodes = [s for s in sexpr.children(self.tree, "symbol") if _reference(s) == reference]
+        if not nodes:
+            raise ToolInputError(
+                f"No symbol with reference {reference!r} in {self.path.name}.",
+                remedy="Call list_schematic_symbols to see what's placed.",
+            )
+        new_ref = fields.get("Reference")
+        if new_ref is not None and new_ref != reference and new_ref in self.references():
+            raise ToolInputError(
+                f"Reference {new_ref!r} is already used in {self.path.name}.",
+                remedy="Pick a free reference, or rename the other symbol first.",
+            )
+
+        changed: dict[str, dict] = {}
+        added: list[str] = []
+        for node in nodes:
+            at = sexpr.values(node, "at")
+            for name, raw in fields.items():
+                value = str(raw)
+                prop = next(
+                    (p for p in sexpr.children(node, "property") if len(p) >= 3 and p[1] == name),
+                    None,
+                )
+                if prop is None:
+                    prop = _property(name, value, float(at[0]), float(at[1]), hide=True)
+                    # Keep properties together, ahead of pins/instances, as KiCad writes them.
+                    last = list(sexpr.children(node, "property"))[-1]
+                    node.insert(next(i for i, n in enumerate(node) if n is last) + 1, prop)
+                    if name not in added:
+                        added.append(name)
+                    continue
+                if prop[2] != value:
+                    changed.setdefault(name, {"old": str(prop[2]), "new": value})
+                    prop[2] = value
+            if new_ref is not None:
+                for ref_node in sexpr.find_all(sexpr.child(node, "instances") or [], "reference"):
+                    ref_node[1] = new_ref
+
+        warnings = []
+        if footprints is not None:
+            warning = footprint_warning(footprints, fields.get("Footprint", ""))
+            if warning:
+                warnings.append(warning)
+        return {
+            "reference": new_ref or reference,
+            "units": len(nodes),
+            "changed": changed,
+            "added": added,
+            "warnings": warnings,
         }
 
     def placements(self, index: SymbolIndex, reference: str) -> list[PlacedSymbol]:
@@ -406,8 +620,11 @@ class SchematicEditor:
 
         prefix = "".join(c for c in lib_id.split(":")[-1] if c.isalpha())[:1] or "U"
         reference = reference or self.next_reference(prefix)
-        x, y = at if at else (self.free_x(index, lib_id), 101.6)
-        x, y = _snap(x), _snap(y)
+        if at:
+            x, y = _snap(at[0]), _snap(at[1])
+        else:
+            # Clear the wire stubs and rail symbols above and below, too.
+            x, y = self.free_spot(index, lib_id, inflate=STUB + 7.62)
 
         builder = self._builder()
         placed = builder.add_symbol(
@@ -515,6 +732,86 @@ class SchematicEditor:
         return self.path
 
 
+def _local_points(node: sexpr.SExpr, unit: int | None = None) -> list[tuple[float, float]]:
+    """Every drawn point of a symbol definition, in its library (Y-up) frame.
+
+    Body graphics and pin connection points; a pin's `at` is its outer end, so
+    pins need nothing extra. With `unit`, only that unit's graphics and the
+    shared (unit 0) ones -- a multi-unit part's units are placed separately.
+    """
+    pts: list[tuple[float, float]] = []
+    for sub in sexpr.children(node, "symbol"):
+        m = re.search(r"_(\d+)_\d+$", str(sub[1]) if len(sub) > 1 else "")
+        if unit is not None and m and int(m.group(1)) not in (0, unit):
+            continue
+        for rect in sexpr.children(sub, "rectangle"):
+            for key in ("start", "end"):
+                v = sexpr.values(rect, key)
+                if v:
+                    pts.append((float(v[0]), float(v[1])))
+        for poly in list(sexpr.children(sub, "polyline")) + list(sexpr.children(sub, "bezier")):
+            for xy in sexpr.children(sexpr.child(poly, "pts") or [], "xy"):
+                pts.append((float(xy[1]), float(xy[2])))
+        for circle in sexpr.children(sub, "circle"):
+            c, r = sexpr.values(circle, "center"), sexpr.value(circle, "radius", 0)
+            if c:
+                cx, cy, r = float(c[0]), float(c[1]), float(r)
+                pts += [(cx - r, cy - r), (cx + r, cy + r)]
+        for arc in sexpr.children(sub, "arc"):
+            for key in ("start", "mid", "end"):
+                v = sexpr.values(arc, key)
+                if v:
+                    pts.append((float(v[0]), float(v[1])))
+        for pin in sexpr.children(sub, "pin"):
+            v = sexpr.values(pin, "at")
+            if v:
+                pts.append((float(v[0]), float(v[1])))
+    return pts or [(0.0, 0.0)]
+
+
+def _relative_box(index: SymbolIndex, lib_id: str) -> Box:
+    """Canvas box of `lib_id` placed unrotated at the origin, fields included.
+
+    Reference and Value go where `SchematicBuilder.add_symbol` puts them:
+    centred, one field-offset beyond the outermost pin above and below.
+    """
+    local = _local_points(index.definition(lib_id), unit=1)
+    pins = [p for p in index.pins(lib_id) if p.unit in (0, 1)]
+    extent = max((abs(p.y) for p in pins), default=10.0) + 5.08
+    pts = [(px, -py) for px, py in local] + [(0.0, -extent), (0.0, extent)]
+    return _grow(_bounds(pts), 1.27)  # field text has height of its own
+
+
+def _bounds(pts: list[tuple[float, float]]) -> Box:
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _grow(box: Box, by: float) -> Box:
+    return (box[0] - by, box[1] - by, box[2] + by, box[3] + by)
+
+
+def _inside(box: Box, area: Box) -> bool:
+    return area[0] <= box[0] and area[1] <= box[1] and box[2] <= area[2] and box[3] <= area[3]
+
+
+def _intersects(a: Box, b: Box) -> bool:
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def _text_box(x: float, y: float, angle: float, text: str, size: float = 1.27) -> Box:
+    """Rough extent of a label or text run from its anchor, along its angle."""
+    length = len(text) * size + size
+    direction = {0: (1, 0), 90: (0, -1), 180: (-1, 0), 270: (0, 1)}.get(int(angle) % 360, (1, 0))
+    end = (x + direction[0] * length, y + direction[1] * length)
+    return _grow(_bounds([(x, y), end]), size)
+
+
+def _snap_up(v: float) -> float:
+    """Snap to the grid without moving closer to what we are clearing."""
+    return round(math.ceil(round(v / GRID, 6)) * GRID, 4)
+
+
 def _reference(symbol: sexpr.SExpr) -> str | None:
     for prop in sexpr.children(symbol, "property"):
         if len(prop) >= 3 and prop[1] == "Reference":
@@ -578,13 +875,13 @@ def add_decoupling_capacitors(
     """
     editor = SchematicEditor.load(schematic)
     added = []
-    x = editor.free_x(index, cap_lib_id)
-    cap_span = editor.half_width(index, cap_lib_id) * 2 + 10.16
-    for i, rail in enumerate(rails):
+    # One at a time: each placement sees the capacitors placed before it, so
+    # a row that fills up wraps instead of running off the sheet.
+    for rail in rails:
         added.append(
             editor.add_two_pin_component(
                 index, cap_lib_id, value, top_rail=rail, bottom_rail=ground,
-                at=(x + i * cap_span, 101.6), footprint=footprint,
+                footprint=footprint,
             )
         )
     editor.save()

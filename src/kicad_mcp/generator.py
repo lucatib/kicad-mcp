@@ -90,15 +90,18 @@ class PlacedSymbol:
             dx = -dx
         return dx, dy
 
-    def pin_point(self, pin: PinInfo) -> tuple[float, float]:
-        """Canvas coordinates of a pin's connection point."""
-        px, py = pin.x, pin.y
+    def to_canvas(self, px: float, py: float) -> tuple[float, float]:
+        """Canvas coordinates of a point given in the symbol's library frame."""
         if self.angle:
             a = math.radians(self.angle)
             cos_a, sin_a = math.cos(a), math.sin(a)
             px, py = px * cos_a - py * sin_a, px * sin_a + py * cos_a
         dx, dy = self._mirrored(px, -py)
         return (round(self.x + dx, 4), round(self.y + dy, 4))
+
+    def pin_point(self, pin: PinInfo) -> tuple[float, float]:
+        """Canvas coordinates of a pin's connection point."""
+        return self.to_canvas(pin.x, pin.y)
 
     def pin_outward(self, pin: PinInfo) -> tuple[float, float]:
         """Unit vector pointing away from the symbol body, in canvas space."""

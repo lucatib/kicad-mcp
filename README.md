@@ -62,10 +62,13 @@ KiCad is running, and a remedy for anything that fails.
 
 **Symbol libraries** — `list_symbol_libraries`, `search_symbols`, `get_symbol_pins`
 
+**Footprint libraries** — `search_footprints`, `get_library_footprint`
+
 **Generation** — `create_pinout_schematic`
 
 **Editing existing schematics** — `add_symbol_to_schematic`, `label_pins`,
-`mark_pins_unused`, `rewire_power_symbol`, `add_decoupling_capacitors`
+`set_symbol_fields`, `mark_pins_unused`, `rewire_power_symbol`,
+`add_decoupling_capacitors`
 
 **Escape hatch** — `run_kicad_script`
 
@@ -88,6 +91,13 @@ symbols take their library's default footprint unless you pass one.
 To wire a symbol that is already on the sheet, `label_pins` takes the same
 `assignments` map for a `reference`. It skips any pin that already has something
 connected, so an existing net is never shorted to a new one.
+
+New symbols are placed in the first free spot on the page: right of existing
+parts, wrapping to a new row, never over the title block. A full sheet is
+refused rather than drawn off-page; pass `x`/`y` to place explicitly. Footprints
+written by `add_symbol_to_schematic` or `set_symbol_fields` are checked against
+the project's `fp-lib-table`, and one that will not resolve is reported with the
+same footprint under a library that does.
 
 The output is a normal `.kicad_sch` you can open and keep editing. It is written
 directly, so KiCad does not need to be running.

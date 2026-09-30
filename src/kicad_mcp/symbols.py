@@ -138,6 +138,28 @@ def _read_table(path: Path, variables: dict[str, str], seen: set[Path]) -> list[
     return entries
 
 
+def resolve_tables(install, project_dir: Path | None, table: str) -> dict[str, LibraryEntry]:
+    """Every library a project sees through `table` (sym-lib-table or fp-lib-table).
+
+    Global table first, then the stock one, then the project's -- later
+    entries win on a name clash, matching KiCad, where a project library
+    shadows a global one of the same nickname.
+    """
+    variables = _substitution_vars(install, project_dir)
+    seen: set[Path] = set()
+    found: list[LibraryEntry] = []
+
+    cfg = _config_dir(install.major)
+    if cfg:
+        found.extend(_read_table(cfg / table, variables, seen))
+    # Fall back to the stock table directly, so a machine whose user
+    # config was never initialised still sees the shipped libraries.
+    found.extend(_read_table(install.share_dir / "template" / table, variables, seen))
+    if project_dir:
+        found.extend(_read_table(project_dir / table, variables, seen))
+    return {e.name: e for e in found}
+
+
 class SymbolIndex:
     """Resolved view of the symbol libraries available to a project."""
 
@@ -154,25 +176,7 @@ class SymbolIndex:
         # was invisible until the server restarted. These are table files
         # (listings, not symbol content), so a rebuild costs ~10 ms against
         # the 30-200 ms of the search and pin lookups it feeds.
-        variables = _substitution_vars(self.install, self.project_dir)
-        seen: set[Path] = set()
-        found: list[LibraryEntry] = []
-
-        cfg = _config_dir(self.install.major)
-        if cfg:
-            found.extend(_read_table(cfg / "sym-lib-table", variables, seen))
-        # Fall back to the stock table directly, so a machine whose user
-        # config was never initialised still sees the shipped libraries.
-        found.extend(
-            _read_table(
-                self.install.share_dir / "template" / "sym-lib-table", variables, seen
-            )
-        )
-        if self.project_dir:
-            found.extend(
-                _read_table(self.project_dir / "sym-lib-table", variables, seen)
-            )
-        return {e.name: e for e in found}
+        return resolve_tables(self.install, self.project_dir, "sym-lib-table")
 
     def list_libraries(self, present_only: bool = True) -> list[dict]:
         out = []

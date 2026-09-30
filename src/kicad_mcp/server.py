@@ -24,6 +24,7 @@ from . import units
 from .discovery import find_install, find_installs
 from .editor import SchematicEditor, add_decoupling_capacitors as _add_decoupling_capacitors
 from .errors import KicadMcpError, NoEditorOpenError
+from .footprints import FootprintIndex, footprint_warning
 from .generator import generate_pinout_schematic
 from .schematic import Schematic, find_project_schematics
 from .session import SESSION, translate
@@ -42,6 +43,7 @@ mcp = MCPServer(
 
 _INSTALL = None
 _INDEX_CACHE: dict[str, SymbolIndex] = {}
+_FP_INDEX_CACHE: dict[str, FootprintIndex] = {}
 
 
 def install():
@@ -56,6 +58,18 @@ def symbol_index(project_dir: str | None = None) -> SymbolIndex:
     if key not in _INDEX_CACHE:
         _INDEX_CACHE[key] = SymbolIndex(install(), Path(project_dir) if project_dir else None)
     return _INDEX_CACHE[key]
+
+
+def footprint_index(project_dir: str | None = None) -> FootprintIndex:
+    key = str(project_dir or "")
+    if key not in _FP_INDEX_CACHE:
+        _FP_INDEX_CACHE[key] = FootprintIndex(install(), Path(project_dir) if project_dir else None)
+    return _FP_INDEX_CACHE[key]
+
+
+def _project_dir_of(path: str, project_dir: str | None) -> str | None:
+    """A schematic's own folder is its project: that is where fp-lib-table lives."""
+    return project_dir or str(Path(path).resolve().parent)
 
 
 def tool_result(fn):
@@ -465,6 +479,25 @@ def get_symbol_pins(lib_id: str, project_dir: str | None = None) -> dict:
     }
 
 
+# --- footprint libraries -------------------------------------------------
+
+
+@mcp.tool()
+@tool_result
+def search_footprints(query: str, library: str | None = None, limit: int = 40,
+                      project_dir: str | None = None) -> dict:
+    """Search footprint libraries by name substring, e.g. 'SOIC-8' or 'HLK-PM'. Resolves KiCad's global and project fp-lib-tables, so project-local .pretty libraries are included. Returns Library:Name ids for a symbol's Footprint field."""
+    hits = footprint_index(project_dir).search(query, limit=limit, library=library)
+    return {"query": query, "count": len(hits), "results": hits}
+
+
+@mcp.tool()
+@tool_result
+def get_library_footprint(lib_id: str, project_dir: str | None = None) -> dict:
+    """Description, tags, attributes and pad numbers of a library footprint (not the open board -- that is get_footprint). Compare pads with get_symbol_pins before assigning it to a symbol."""
+    return footprint_index(project_dir).info(lib_id)
+
+
 # --- generation ----------------------------------------------------------
 
 
@@ -506,6 +539,8 @@ def add_symbol_to_schematic(
     reference: str | None = None,
     value: str | None = None,
     footprint: str = "",
+    x: float | None = None,
+    y: float | None = None,
     project_dir: str | None = None,
 ) -> dict:
     """Place a symbol into an existing .kicad_sch and wire named pins to nets by label.
@@ -517,15 +552,22 @@ def add_symbol_to_schematic(
     Unlike an MCU there is no automatic power-pin wiring: a connector's pins are
     not VDD/GND by convention, so nothing is guessed. Call mark_pins_unused
     separately for pins that should be no-connected rather than left floating.
-    The symbol is placed clear of everything already on the sheet. An empty
-    footprint takes the library symbol's default footprint.
+    Without x/y the symbol goes in the first free spot on the page -- right of
+    existing parts, wrapping to a new row, never over the title block; if the
+    sheet is full it refuses rather than placing off-page. An empty footprint
+    takes the library symbol's default. `warnings` flags an explicit x/y off
+    the page and a footprint the project's fp-lib-table cannot resolve.
     """
     index = symbol_index(project_dir)
     editor = SchematicEditor.load(path)
+    at = (x, y) if x is not None and y is not None else None
     result = editor.place_symbol(
-        index, lib_id, assignments, reference=reference, value=value, footprint=footprint,
+        index, lib_id, assignments, reference=reference, value=value, footprint=footprint, at=at,
     )
     editor.save()
+    warning = footprint_warning(footprint_index(_project_dir_of(path, project_dir)), result["footprint"])
+    if warning:
+        result["warnings"].append(warning)
     result["schematic"] = str(editor.path)
     return result
 
@@ -551,6 +593,31 @@ def label_pins(
     index = symbol_index(project_dir)
     editor = SchematicEditor.load(path)
     result = editor.label_pins(index, reference, assignments)
+    editor.save()
+    result["schematic"] = str(editor.path)
+    return result
+
+
+@mcp.tool()
+@tool_result
+def set_symbol_fields(
+    path: str,
+    reference: str,
+    fields: dict[str, str],
+    project_dir: str | None = None,
+) -> dict:
+    """Set fields of an already-placed symbol: Value, Footprint, Datasheet, or any custom field (MPN, ...).
+
+    Applies to every unit of a multi-unit part. Fields the symbol lacks are
+    added hidden. Renaming via {"Reference": "J5"} updates KiCad's annotation
+    record too and refuses a reference already in use. A Footprint that the
+    project's fp-lib-table cannot resolve is written but reported in
+    warnings, with the same footprint under a library that does resolve.
+    """
+    editor = SchematicEditor.load(path)
+    result = editor.set_fields(
+        reference, fields, footprints=footprint_index(_project_dir_of(path, project_dir)),
+    )
     editor.save()
     result["schematic"] = str(editor.path)
     return result
