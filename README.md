@@ -18,8 +18,30 @@ no cross-interpreter bridge.
 
 ## Install
 
+Create the venv from KiCad's own Python. Where that is depends on how KiCad was
+installed:
+
+| KiCad installed for | KiCad folder | Its Python |
+|---|---|---|
+| All users (default) | `C:\Program Files\KiCad\10.0` | `C:\Program Files\KiCad\10.0\bin\python.exe` |
+| Only me | `%LOCALAPPDATA%\Programs\KiCad\10.0` | `%LOCALAPPDATA%\Programs\KiCad\10.0\bin\python.exe` |
+
+All users:
+
 ```bash
 "C:/Program Files/KiCad/10.0/bin/python.exe" -m venv --system-site-packages .venv
+```
+
+Only me (`%LOCALAPPDATA%` is `C:\Users\<you>\AppData\Local`):
+
+```bash
+"$LOCALAPPDATA/Programs/KiCad/10.0/bin/python.exe" -m venv --system-site-packages .venv
+```
+
+The same in PowerShell:
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\KiCad\10.0\bin\python.exe" -m venv --system-site-packages .venv
 ```
 
 ```bash
@@ -33,7 +55,26 @@ Then check the environment:
 ```
 
 `doctor` reports every dependency, whether the IPC server is enabled, whether
-KiCad is running, and a remedy for anything that fails.
+KiCad is running, and a remedy for anything that fails. Its `KiCad install` line
+shows which folder was found.
+
+The server finds KiCad on its own in both locations above, and through the
+uninstall entries in the registry. For KiCad anywhere else (an extracted or
+portable copy, another drive), or to choose between several installed versions,
+set `KICAD_MCP_KICAD_ROOT` to the KiCad folder, the one containing `bin\`. In
+the client configuration that is an `env` entry:
+
+```json
+{
+  "mcpServers": {
+    "kicad": {
+      "command": "C:\\Workspace\\mcp_kicad\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "kicad_mcp"],
+      "env": {"KICAD_MCP_KICAD_ROOT": "D:\\Tools\\KiCad\\10.0"}
+    }
+  }
+}
+```
 
 ## MCP client configuration
 

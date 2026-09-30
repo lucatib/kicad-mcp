@@ -80,11 +80,12 @@ class InstallResolver(Protocol):
 
 
 class WindowsResolver:
-    """Registry first, then the conventional Program Files layout.
+    """Registry first, then the conventional install folders.
 
     Both are consulted because a user may have installed KiCad without an
     uninstall entry (portable/extracted installs are common for side-by-side
-    version testing).
+    version testing). The folders are Program Files for an all-users install
+    and %LOCALAPPDATA%\\Programs for "install for me only".
     """
 
     UNINSTALL_KEYS = (
@@ -139,6 +140,8 @@ class WindowsResolver:
             os.environ.get("ProgramFiles", r"C:\Program Files"),
             os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
         ]
+        if os.environ.get("LOCALAPPDATA"):
+            roots.append(str(Path(os.environ["LOCALAPPDATA"]) / "Programs"))
         for r in roots:
             base = Path(r) / "KiCad"
             if not base.is_dir():
