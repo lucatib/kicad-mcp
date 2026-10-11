@@ -115,7 +115,7 @@ class TestPlaceSymbol:
         res = editor.place_symbol(index, CONN, {"1": "LED"}, reference="J1", value="HDR")
         editor.save()
 
-        assert res["connected"] == [{"pin": "1", "pin_name": "Pin_1", "net": "LED"}]
+        assert res["connected"] == [{"pin": "1", "pin_name": "Pin_1", "net": "LED", "via": "label"}]
         assert res["unmatched_assignments"] == []
 
         root = _netlist(install, base_sch)
@@ -273,7 +273,7 @@ class TestLabelPins:
         res = editor.label_pins(index, "J1", {"1": "LED"})
         editor.save()
 
-        assert res["connected"] == [{"pin": "1", "pin_name": "Pin_1", "net": "LED"}]
+        assert res["connected"] == [{"pin": "1", "pin_name": "Pin_1", "net": "LED", "via": "label"}]
         refs = {ref for ref, _ in _nodes(_netlist(install, base_sch), "/LED")}
         assert refs == {"U1", "J1"}
 

@@ -43,6 +43,18 @@ def test_explicit_coordinates_are_honoured(sch):
     assert res["position"] == {"x": 50.8, "y": 50.8}
 
 
+def test_wiring_tools_pass_global_nets_through(sch):
+    placed = server.add_symbol_to_schematic(
+        str(sch), "Connector_Generic:Conn_01x03", {"1": "SDA", "2": "GND"},
+        reference="J1", global_nets=["SDA"],
+    )
+    assert "error" not in placed, placed
+    assert [c["via"] for c in placed["connected"]] == ["global_label", "power_symbol"]
+    labelled = server.label_pins(str(sch), "J1", {"3": "SCL"}, global_nets=["SCL"])
+    assert "error" not in labelled, labelled
+    assert labelled["connected"][0]["via"] == "global_label"
+
+
 def test_set_symbol_fields_tool_round_trip(sch):
     res = server.set_symbol_fields(str(sch), "U1", {"Value": "MCU", "MPN": "X-1"})
     assert "error" not in res, res

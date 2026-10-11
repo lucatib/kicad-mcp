@@ -124,14 +124,50 @@ the client configuration that is an `env` entry:
 ```
 
 Pin matching ignores case, underscores and hyphens, so `IO4`, `GPIO_4` and `io4`
-all resolve to the same pin. Assigned pins get a wire and a net label; power pins
-get power symbols plus `PWR_FLAG` so ERC does not report undriven rails.
-Unmatched assignments are reported back rather than silently dropped. Placed
-symbols take their library's default footprint unless you pass one.
+all resolve to the same pin. Each assigned pin gets a short wire and whatever
+joins it to its net (see below); the MCU's unassigned power pins get power
+symbols plus `PWR_FLAG` so ERC does not report undriven rails. Unmatched
+assignments are reported back rather than silently dropped. Placed symbols take
+their library's default footprint unless you pass one.
 
 To wire a symbol that is already on the sheet, `label_pins` takes the same
 `assignments` map for a `reference`. It skips any pin that already has something
 connected, so an existing net is never shorted to a new one.
+
+### How a pin joins its net
+
+Every wiring tool (`create_pinout_schematic`, `add_symbol_to_schematic`,
+`label_pins`) picks one of three, and reports it per pin as `via`:
+
+| Net | Joined by | Reaches |
+|---|---|---|
+| A rail: a `power` library name (`GND`, `+3V3`, `VBUS`...), a power symbol's value already in the project, or a lib_id such as `"power:+5V"` | power symbol, pointing away from the pin | every sheet |
+| A name in `global_nets`, or one already used by a global label in the project | global label, shaped from the pin's direction | every sheet |
+| Anything else | local label | this sheet only |
+
+```json
+{
+  "path": "C:/proj/sensors.kicad_sch",
+  "reference": "J3",
+  "assignments": {"1": "+3V3", "2": "SDA", "3": "SCL", "4": "GND"},
+  "global_nets": ["SDA", "SCL"]
+}
+```
+
+A local label never leaves its sheet, and a global label does not join a local
+one of the same name on another sheet; when a net would end up split that way,
+`warnings` names the sheets to fix.
+
+### Sheets of a project
+
+A sheet is not a project of its own. KiCad annotates each symbol under the
+project name and the path of sheet symbols from the root schematic down to its
+sheet, and a sheet used twice holds one annotation per use. Before writing a
+symbol, the tools find the `.kicad_pro` beside the file or up to three folders
+above it, walk its hierarchy from the root, and write one instance per use of
+the sheet. References are free across every sheet: a part on a sheet used twice
+gets two (`R3` and `R4`, listed in `instances`), so both copies reach the board
+as separate parts. A file outside any project stays its own root, as before.
 
 New symbols are placed in the first free spot on the page: right of existing
 parts, wrapping to a new row, never over the title block. When the nets in

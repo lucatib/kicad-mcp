@@ -12,14 +12,17 @@ document.
 
 from __future__ import annotations
 
+import functools
 import math
-import re
 from pathlib import Path
 
-from . import sexpr
+from . import hierarchy, sexpr
 from .errors import ToolInputError
 from .footprints import FootprintIndex, footprint_warning
-from .generator import GRID, LABEL_STUB, PlacedSymbol, SchematicBuilder, _normalise_key, _property, _snap
+from .generator import (
+    GRID, LABEL_STUB, Join, PlacedSymbol, SchematicBuilder, _local_points, _normalise_key,
+    _property, _snap, classify_net,
+)
 from .schematic import Schematic
 from .sexpr import Sym
 from .symbols import PinInfo, SymbolIndex
@@ -67,30 +70,31 @@ class SchematicEditor:
     def root_uuid(self) -> str:
         return str(sexpr.value(self.tree, "uuid", ""))
 
+    @functools.cached_property
+    def place(self) -> hierarchy.SheetPlace:
+        """This file's project and the sheet paths it is used under."""
+        return hierarchy.locate(self.path, self.tree)
+
     @property
     def project_name(self) -> str:
-        """The project name recorded on existing symbols.
+        """The project KiCad annotates this sheet's symbols under.
 
-        New symbols must use the same name; a mismatch makes KiCad treat them as
+        New symbols must use it; a mismatch makes KiCad treat them as
         belonging to a different project and drop their annotation.
         """
-        for symbol in sexpr.children(self.tree, "symbol"):
-            instances = sexpr.child(symbol, "instances")
-            if instances is None:
-                continue
-            project = sexpr.child(instances, "project")
-            if project is not None and len(project) > 1 and isinstance(project[1], str):
-                return project[1]
-        return self.path.stem
+        return self.place.project
 
     def _builder(self) -> SchematicBuilder:
-        builder = SchematicBuilder(project_name=self.project_name)
+        builder = SchematicBuilder(project_name=self.place.project)
         builder.uuid = self.root_uuid
+        builder.instance_paths = list(self.place.paths)
+        builder.taken = self.taken_references()
         return builder
 
     # --- queries --------------------------------------------------------
 
     def references(self) -> set[str]:
+        """References shown on this sheet's symbols."""
         refs = set()
         for symbol in sexpr.children(self.tree, "symbol"):
             for prop in sexpr.children(symbol, "property"):
@@ -98,13 +102,45 @@ class SchematicEditor:
                     refs.add(str(prop[2]))
         return refs
 
+    def taken_references(self) -> set[str]:
+        """Every reference in use in the project, on this sheet's every use included."""
+        return hierarchy.symbol_references(self.tree, self.place.project) | self.place.taken_references()
+
     def next_reference(self, prefix: str) -> str:
-        """First free `prefix<N>`, so repeated edits do not collide."""
-        existing = self.references()
+        """First `prefix<N>` free across the project, so edits never collide."""
+        existing = self.taken_references()
         n = 1
         while f"{prefix}{n}" in existing:
             n += 1
         return f"{prefix}{n}"
+
+    def net_joins(self, index: SymbolIndex, nets, global_nets: list[str] | None = None) -> dict[str, Join]:
+        """How each net joins its pins; see `generator.classify_net`."""
+        power = {**self.place.power_nets(), **hierarchy.power_nets(self.tree)}
+        globals_ = self.place.global_labels() | hierarchy.label_names(self.tree, "global_label")
+        wanted = set(global_nets or ())
+        return {str(n): classify_net(index, str(n), wanted, power, globals_) for n in nets}
+
+    def _join_warnings(self, joins: dict[str, Join]) -> list[str]:
+        """Labels that look connected across sheets but are not.
+
+        A local label never reaches another sheet, and a global label does not
+        join a local one of the same name on another sheet either.
+        """
+        out = []
+        for join in joins.values():
+            if join.via == "power_symbol":
+                continue  # KiCad joins same-named local labels to a power net
+            sheets = self.place.sheets_with_local_label(join.net)
+            if not sheets:
+                continue
+            here = "a local label here" if join.via == "label" else "a global label here"
+            out.append(
+                f"{join.net} is also a local label on {', '.join(sheets)}; as {here} it is "
+                "a different net. To connect them, pass it in global_nets here and turn "
+                "those labels global (in KiCad: right-click > Change To > Global Label)."
+            )
+        return out
 
     # --- page and placement ---------------------------------------------
 
@@ -451,35 +487,44 @@ class SchematicEditor:
         value: str | None = None,
         footprint: str = "",
         at: tuple[float, float] | None = None,
+        global_nets: list[str] | None = None,
     ) -> dict:
         """Place a new symbol into this (already-existing) schematic and wire
-        named pins to nets by label.
+        named pins to nets.
 
-        This is `generate_pinout_schematic`'s pin-matching and label-wiring,
+        This is `generate_pinout_schematic`'s pin-matching and net-joining,
         aimed at a file that already has content instead of authoring a fresh
-        one. Unlike that function there is no MCU-specific power auto-wiring --
-        a generic connector's pins 1/5/6 are not "VDD"/"GND" by convention, so
-        guessing would be wrong more often than it helped. Call
-        `mark_pins_unused` separately for pins that should be no-connected
-        rather than left floating.
+        one: power rails get power symbols, names in `global_nets` (or already
+        global in the project) global labels, the rest local labels. Unlike
+        that function there is no MCU-specific power auto-wiring -- a generic
+        connector's pins 1/5/6 are not "VDD"/"GND" by convention, so guessing
+        would be wrong more often than it helped. Call `mark_pins_unused`
+        separately for pins that should be no-connected rather than left
+        floating.
         """
+        joins = self.net_joins(index, assignments.values(), global_nets)
         prefix = "".join(c for c in lib_id.split(":")[-1] if c.isalpha())[:1] or "U"
+        warnings = []
+        if reference and reference in self.taken_references():
+            warnings.append(f"{reference} is already used in project {self.place.project}; "
+                            "rename one of them with set_symbol_fields.")
         reference = reference or self.next_reference(prefix)
         value = value if value is not None else lib_id.split(":")[-1]
         mirror = None
         if at:
             x, y = _snap(at[0]), _snap(at[1])
-            warnings = self.placement_warnings(index, lib_id, x, y)
+            warnings += self.placement_warnings(index, lib_id, x, y)
         else:
             # Room for the labels about to hang off its pins, not just the body.
             longest = max((len(str(net)) for net in assignments.values()), default=0)
             inflate = LABEL_STUB + longest * 1.27 if assignments else 0.0
-            links = self._links(index, lib_id, assignments)
+            # A rail is everywhere; sitting next to one of its pins says nothing.
+            signals = {k: v for k, v in assignments.items() if joins[str(v)].via != "power_symbol"}
+            links = self._links(index, lib_id, signals)
             if links:
                 x, y, mirror = self.connected_spot(index, lib_id, links, inflate=inflate)
             else:
                 x, y = self.free_spot(index, lib_id, inflate=inflate)
-            warnings = []
 
         builder = self._builder()
         placed = builder.add_symbol(index, lib_id, reference, value, x=x, y=y,
@@ -488,8 +533,8 @@ class SchematicEditor:
         matched, unmatched = _match_pins([placed], assignments)
         connected = []
         for sym, pin, net in matched:
-            builder.label_pin(sym, pin, net)
-            connected.append({"pin": pin.number, "pin_name": pin.name, "net": net})
+            builder.connect_pin(index, sym, pin, joins[net])
+            connected.append(joins[net].describe(pin))
 
         self._merge(builder)
         return {
@@ -498,7 +543,8 @@ class SchematicEditor:
             "position": {"x": x, "y": y},
             "footprint": placed.footprint,
             "mirrored": mirror is not None,
-            "warnings": warnings,
+            "instances": [{"path": p, "reference": r} for p, r in placed.instances],
+            "warnings": warnings + self._join_warnings(joins),
             "connected": connected,
             "unmatched_assignments": unmatched,
             "available_pin_names": [p.name for p in placed.pins][:200],
@@ -509,11 +555,12 @@ class SchematicEditor:
         index: SymbolIndex,
         reference: str,
         assignments: dict[str, str],
+        global_nets: list[str] | None = None,
     ) -> dict:
-        """Wire named pins of an already-placed symbol to nets by label.
+        """Wire named pins of an already-placed symbol to nets.
 
-        `place_symbol` can only label pins at the moment it places a symbol;
-        this is the same pin-matching and label-wiring for one that is already
+        `place_symbol` can only wire pins at the moment it places a symbol;
+        this is the same pin-matching and net-joining for one that is already
         on the sheet -- placed by an earlier call or by hand, rotated or
         mirrored. Multi-unit symbols are searched across every placed unit.
 
@@ -523,17 +570,17 @@ class SchematicEditor:
         """
         placed = self.placements(index, reference)
         matched, unmatched = _match_pins(placed, assignments)
+        joins = self.net_joins(index, {net for _, _, net in matched}, global_nets)
         occupied = self._occupied_points(index, exclude=reference)
 
         builder = self._builder()
         connected, skipped = [], []
         for sym, pin, net in matched:
-            entry = {"pin": pin.number, "pin_name": pin.name, "net": net}
             if _key(sym.pin_point(pin)) in occupied:
-                skipped.append(entry)
+                skipped.append({"pin": pin.number, "pin_name": pin.name, "net": net})
                 continue
-            builder.label_pin(sym, pin, net)
-            connected.append(entry)
+            builder.connect_pin(index, sym, pin, joins[net])
+            connected.append(joins[net].describe(pin))
 
         self._merge(builder)
         return {
@@ -541,6 +588,7 @@ class SchematicEditor:
             "connected": connected,
             "already_connected": skipped,
             "unmatched_assignments": unmatched,
+            "warnings": self._join_warnings(joins),
             "available_pin_names": [p.name for s in placed for p in s.pins][:200],
         }
 
@@ -556,7 +604,9 @@ class SchematicEditor:
         units of one part to agree. A field the symbol lacks is added hidden.
         Renaming `Reference` also rewrites the `instances` block -- KiCad
         annotates from there, so changing only the visible field would revert
-        on the next annotation. With `footprints`, a Footprint that does not
+        on the next annotation. On a sheet used more than once only the use
+        that carries the old reference is renamed; the other uses are other
+        parts with references of their own. With `footprints`, a Footprint that does not
         resolve is still written (the library may be registered later) but
         reported, naming the same footprint under a library that does resolve.
         """
@@ -567,9 +617,9 @@ class SchematicEditor:
                 remedy="Call list_schematic_symbols to see what's placed.",
             )
         new_ref = fields.get("Reference")
-        if new_ref is not None and new_ref != reference and new_ref in self.references():
+        if new_ref is not None and new_ref != reference and new_ref in self.taken_references():
             raise ToolInputError(
-                f"Reference {new_ref!r} is already used in {self.path.name}.",
+                f"Reference {new_ref!r} is already used in project {self.place.project}.",
                 remedy="Pick a free reference, or rename the other symbol first.",
             )
 
@@ -595,7 +645,10 @@ class SchematicEditor:
                     changed.setdefault(name, {"old": str(prop[2]), "new": value})
                     prop[2] = value
             if new_ref is not None:
-                for ref_node in sexpr.find_all(sexpr.child(node, "instances") or [], "reference"):
+                ref_nodes = list(sexpr.find_all(sexpr.child(node, "instances") or [], "reference"))
+                # A lone stale entry is this part's too; KiCad copies the field into it on load.
+                matching = [n for n in ref_nodes if n[1] == reference]
+                for ref_node in matching or (ref_nodes if len(ref_nodes) == 1 else []):
                     ref_node[1] = new_ref
 
         warnings = []
@@ -750,6 +803,7 @@ class SchematicEditor:
         placed = builder.add_symbol(
             index, lib_id, reference, value, x=x, y=y, footprint=footprint
         )
+        builder.use_library_fields(placed)  # off the rail wires above and below
 
         # Order pins by canvas y so "top" and "bottom" mean what they look like.
         ordered = sorted(pins[:2], key=lambda p: placed.pin_point(p)[1])
@@ -758,10 +812,7 @@ class SchematicEditor:
             dx, dy = placed.pin_outward(pin)
             end = (_snap(point[0] + dx * STUB), _snap(point[1] + dy * STUB))
             builder.add_wire(point, end)
-            builder.add_symbol_pinned_at(
-                index, rail, self.next_power_reference(builder),
-                rail.split(":")[-1], target=end, hide_reference=True,
-            )
+            builder.add_power_symbol(index, rail, end, (dx, dy))
 
         self._merge(builder)
         return {
@@ -772,20 +823,6 @@ class SchematicEditor:
             "top_rail": top_rail,
             "bottom_rail": bottom_rail,
         }
-
-    def next_power_reference(self, builder: SchematicBuilder) -> str:
-        """Power symbols use #PWRnnn; keep them unique across edits."""
-        used = {r for r in self.references() if r.startswith("#PWR")}
-        used |= {
-            str(prop[2])
-            for node in builder.parts()["symbols"]
-            for prop in sexpr.children(node, "property")
-            if len(prop) >= 3 and prop[1] == "Reference" and str(prop[2]).startswith("#PWR")
-        }
-        n = 1
-        while f"#PWR{n:03d}" in used:
-            n += 1
-        return f"#PWR{n:03d}"
 
     # --- internals ------------------------------------------------------
 
@@ -850,45 +887,6 @@ class SchematicEditor:
     def save(self) -> Path:
         self.path.write_text(sexpr.dumps(self.tree), encoding="utf-8")
         return self.path
-
-
-def _local_points(node: sexpr.SExpr, unit: int | None = None,
-                  include_pins: bool = True) -> list[tuple[float, float]]:
-    """Every drawn point of a symbol definition, in its library (Y-up) frame.
-
-    Body graphics and pin connection points; a pin's `at` is its outer end, so
-    pins need nothing extra; `include_pins=False` gives the body alone. With
-    `unit`, only that unit's graphics and the shared (unit 0) ones -- a
-    multi-unit part's units are placed separately.
-    """
-    pts: list[tuple[float, float]] = []
-    for sub in sexpr.children(node, "symbol"):
-        m = re.search(r"_(\d+)_\d+$", str(sub[1]) if len(sub) > 1 else "")
-        if unit is not None and m and int(m.group(1)) not in (0, unit):
-            continue
-        for rect in sexpr.children(sub, "rectangle"):
-            for key in ("start", "end"):
-                v = sexpr.values(rect, key)
-                if v:
-                    pts.append((float(v[0]), float(v[1])))
-        for poly in list(sexpr.children(sub, "polyline")) + list(sexpr.children(sub, "bezier")):
-            for xy in sexpr.children(sexpr.child(poly, "pts") or [], "xy"):
-                pts.append((float(xy[1]), float(xy[2])))
-        for circle in sexpr.children(sub, "circle"):
-            c, r = sexpr.values(circle, "center"), sexpr.value(circle, "radius", 0)
-            if c:
-                cx, cy, r = float(c[0]), float(c[1]), float(r)
-                pts += [(cx - r, cy - r), (cx + r, cy + r)]
-        for arc in sexpr.children(sub, "arc"):
-            for key in ("start", "mid", "end"):
-                v = sexpr.values(arc, key)
-                if v:
-                    pts.append((float(v[0]), float(v[1])))
-        for pin in sexpr.children(sub, "pin") if include_pins else ():
-            v = sexpr.values(pin, "at")
-            if v:
-                pts.append((float(v[0]), float(v[1])))
-    return pts or [(0.0, 0.0)]
 
 
 def _relative_box(index: SymbolIndex, lib_id: str) -> Box:

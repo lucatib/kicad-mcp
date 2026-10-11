@@ -512,19 +512,25 @@ def create_pinout_schematic(
     reference: str = "U1",
     footprint: str = "",
     connect_power: bool = True,
+    global_nets: list[str] | None = None,
     project_dir: str | None = None,
 ) -> dict:
     """Create a .kicad_sch from a firmware pinout by importing a symbol from a KiCad library.
 
     `assignments` maps pin names or numbers to net names, e.g. {"IO4": "LED_STATUS", "GPIO_8": "SPI_MOSI"}.
     Matching ignores case, underscores and hyphens, so IO4/GPIO_4/io4 all work.
-    Assigned pins get a wire and a net label; power pins get power symbols and PWR_FLAG automatically.
-    The file is written directly and does not need KiCad running.
+    Each assigned pin gets a wire and, by net: a power symbol for rails (GND, +3V3,
+    any power-library name, or a lib_id like "power:+5V"); a global label for names
+    in `global_nets` or already global in the project (these reach other sheets);
+    otherwise a local label, which connects only within this sheet. Unassigned
+    power pins get power symbols and PWR_FLAG automatically. If `output` is a
+    sheet of a KiCad project, symbols are annotated under that project's
+    hierarchy. The file is written directly and does not need KiCad running.
     """
     return generate_pinout_schematic(
         symbol_index(project_dir), output, mcu_lib_id, assignments,
         title=title, mcu_reference=reference, mcu_footprint=footprint,
-        connect_power=connect_power,
+        connect_power=connect_power, global_nets=global_nets,
     )
 
 
@@ -542,28 +548,40 @@ def add_symbol_to_schematic(
     footprint: str = "",
     x: float | None = None,
     y: float | None = None,
+    global_nets: list[str] | None = None,
     project_dir: str | None = None,
 ) -> dict:
-    """Place a symbol into an existing .kicad_sch and wire named pins to nets by label.
+    """Place a symbol into an existing .kicad_sch and wire named pins to nets.
 
     Unlike create_pinout_schematic this edits a file that already has content
     instead of authoring a new one -- existing symbols, wires and labels are
     left untouched. `assignments` maps pin names or numbers to net names, same
     matching rules as create_pinout_schematic (case/underscore/hyphen-insensitive).
+    How each pin joins its net, reported as `via`: a power symbol for rails
+    (GND, +3V3, any power-library name, a lib_id like "power:+5V", or a power
+    net already in the project); a global label for names in `global_nets` or
+    already global in the project -- use these for signals that cross sheets;
+    otherwise a local label, which connects only within this sheet.
     Unlike an MCU there is no automatic power-pin wiring: a connector's pins are
     not VDD/GND by convention, so nothing is guessed. Call mark_pins_unused
     separately for pins that should be no-connected rather than left floating.
+    On a sheet of a KiCad project the symbol is annotated under the project's
+    hierarchy, with a reference free across all sheets (one per use of a
+    reused sheet, listed in `instances`).
     Without x/y the symbol goes in the first free spot on the page -- right of
     existing parts, wrapping to a new row, never over the title block; if the
     sheet is full it refuses rather than placing off-page. An empty footprint
     takes the library symbol's default. `warnings` flags an explicit x/y off
-    the page and a footprint the project's fp-lib-table cannot resolve.
+    the page, a footprint the project's fp-lib-table cannot resolve, a
+    reference already used elsewhere, and a label that will not reach a
+    same-named local label on another sheet.
     """
     index = symbol_index(project_dir)
     editor = SchematicEditor.load(path)
     at = (x, y) if x is not None and y is not None else None
     result = editor.place_symbol(
         index, lib_id, assignments, reference=reference, value=value, footprint=footprint, at=at,
+        global_nets=global_nets,
     )
     editor.save()
     warning = footprint_warning(footprint_index(_project_dir_of(path, project_dir)), result["footprint"])
@@ -579,21 +597,23 @@ def label_pins(
     path: str,
     reference: str,
     assignments: dict[str, str],
+    global_nets: list[str] | None = None,
     project_dir: str | None = None,
 ) -> dict:
-    """Wire named pins of an already-placed symbol to nets by label.
+    """Wire named pins of an already-placed symbol to nets.
 
-    add_symbol_to_schematic only labels pins at the moment it places a symbol;
+    add_symbol_to_schematic only wires pins at the moment it places a symbol;
     use this for symbols already on the sheet, placed earlier or by hand
     (rotated and mirrored symbols included). `assignments` maps pin names or
-    numbers to net names, same matching rules as add_symbol_to_schematic. Two
+    numbers to net names, same matching and the same power-symbol / global-label
+    / local-label choice (`via`, `global_nets`) as add_symbol_to_schematic. Two
     pins given the same net name are connected. A pin that already has a wire,
     label, no-connect or another pin on it is left alone and listed under
     already_connected, since a second label would short two nets together.
     """
     index = symbol_index(project_dir)
     editor = SchematicEditor.load(path)
-    result = editor.label_pins(index, reference, assignments)
+    result = editor.label_pins(index, reference, assignments, global_nets=global_nets)
     editor.save()
     result["schematic"] = str(editor.path)
     return result
@@ -611,7 +631,8 @@ def set_symbol_fields(
 
     Applies to every unit of a multi-unit part. Fields the symbol lacks are
     added hidden. Renaming via {"Reference": "J5"} updates KiCad's annotation
-    record too and refuses a reference already in use. A Footprint that the
+    record too and refuses a reference already in use on any sheet of the
+    project. A Footprint that the
     project's fp-lib-table cannot resolve is written but reported in
     warnings, with the same footprint under a library that does resolve.
     """
