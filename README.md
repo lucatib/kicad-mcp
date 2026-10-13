@@ -109,7 +109,7 @@ the client configuration that is an `env` entry:
 
 **Editing existing schematics** — `add_symbol_to_schematic`, `label_pins`,
 `set_symbol_fields`, `mark_pins_unused`, `rewire_power_symbol`,
-`add_decoupling_capacitors`, `route_nets`
+`add_decoupling_capacitors`, `remove_symbols`, `route_nets`
 
 **Escape hatch** — `run_kicad_script`
 
@@ -178,6 +178,21 @@ refused rather than drawn off-page; pass `x`/`y` to place explicitly. Footprints
 written by `add_symbol_to_schematic` or `set_symbol_fields` are checked against
 the project's `fp-lib-table`, and one that will not resolve is reported with the
 same footprint under a library that does.
+
+### Removing parts: `remove_symbols`
+
+```json
+{"path": "C:/proj/sensors.kicad_sch", "references": ["J3", "C7"]}
+```
+
+Every unit of each part goes, along with what was there only to connect it:
+wire runs that now end in nothing, and labels, power symbols, `PWR_FLAG`s,
+no-connects and junctions that no longer reach any pin. Anything still wired to
+another part or a sheet pin stays. Two things that reach no pin are kept and
+reported in `warnings` instead: wiring that joins two net names, since removing
+it would split those nets, and hierarchical labels, which the parent sheet's pin
+refers to. On a sheet used more than once the part goes from every use. An
+unknown reference removes nothing; `dry_run` reports without writing.
 
 ### Drawing wires: `route_nets`
 

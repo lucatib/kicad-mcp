@@ -6,18 +6,19 @@ and new symbols must join the same project and sheet instance as the old ones or
 KiCad treats them as unannotated strays.
 
 Edits append rather than rewrite. Anything the user drew by hand between our
-edits is preserved, because we only ever add nodes and never regenerate the
-document.
+edits is preserved, because we touch only the nodes an edit is about and never
+regenerate the document.
 """
 
 from __future__ import annotations
 
 import functools
 import math
+from collections import defaultdict
 from pathlib import Path
 
 from . import hierarchy, sexpr
-from .errors import ToolInputError
+from .errors import KicadMcpError, ToolInputError
 from .footprints import FootprintIndex, footprint_warning
 from .generator import (
     GRID, LABEL_STUB, Join, PlacedSymbol, SchematicBuilder, _local_points, _normalise_key,
@@ -25,7 +26,7 @@ from .generator import (
 )
 from .schematic import Schematic
 from .sexpr import Sym
-from .symbols import PinInfo, SymbolIndex
+from .symbols import PinInfo, SymbolIndex, definition_pins
 
 #: Where a two-pin part's pins sit relative to its centre, for Device:C and
 #: friends: pin 1 above, pin 2 below, both on the 1.27 mm grid.
@@ -747,7 +748,7 @@ class SchematicEditor:
                 f"Cannot swap {old_lib_id} for {new_lib_id}: their pins sit at "
                 f"different positions ({a.x},{a.y},{a.angle}) vs ({b.x},{b.y},{b.angle}), "
                 "so existing wires would no longer connect.",
-                remedy="Delete and re-place the symbol instead.",
+                remedy="Remove it with remove_symbols and place the new one instead.",
             )
 
         new_name = new_lib_id.split(":")[-1]
@@ -766,6 +767,61 @@ class SchematicEditor:
             self._ensure_lib_symbol(index, new_lib_id)
             self._prune_unused_lib_symbols()
         return changed
+
+    def remove_symbols(self, index: SymbolIndex, references: list[str]) -> dict:
+        """Delete placed symbols, and whatever was there only to connect them.
+
+        Every unit of a part goes, and on a sheet used more than once it goes
+        from every use -- there is only one drawing. Then what hung off its
+        pins: wire runs that now end in nothing, and labels, power symbols,
+        PWR_FLAGs, no-connects and junctions that no longer reach any pin.
+        Anything still reaching another part's pin or a sheet pin stays. So
+        do two things that reach no pin but are reported instead of removed:
+        wiring that joins two net names, since removing it would split those
+        nets for the parts still on them, and a hierarchical label, which the
+        parent sheet's pin refers to. An unknown reference removes nothing.
+        """
+        wanted = list(dict.fromkeys(str(r) for r in references))
+        nodes = [s for s in sexpr.children(self.tree, "symbol") if _all_references(s) & set(wanted)]
+        found = set().union(*map(_all_references, nodes))
+        missing = [r for r in wanted if r not in found]
+        if missing:
+            raise ToolInputError(
+                f"No symbol with reference {', '.join(missing)} in {self.path.name}; nothing was removed.",
+                remedy="Call list_schematic_symbols to see what's placed.",
+            )
+
+        embedded = _embedded_definitions(self.tree)
+        seeds: list[tuple[float, float]] = []
+        warnings: dict[str, str] = {}
+        for node in nodes:
+            ref = _reference(node) or "?"
+            points = _pin_points(index, embedded, node)
+            if points is None:
+                warnings[f"pins:{ref}"] = (
+                    f"Pins of {ref} ({sexpr.value(node, 'lib_id')}) are unknown, so what was "
+                    "wired to it was left as drawn."
+                )
+            seeds += points or []
+            uses = sorted(set(_instance_references(node)))
+            if len(uses) > 1:
+                warnings[f"uses:{ref}"] = (
+                    f"{ref} is drawn once on a sheet used {len(uses)} times; removing it "
+                    f"removed {', '.join(uses)}."
+                )
+
+        gone = {id(n) for n in nodes}
+        self.tree[:] = [n for n in self.tree if id(n) not in gone]
+        layout = _Layout(self.tree, index, embedded)
+        cleaned = layout.clean_up([_key(p) for p in seeds])
+        self.tree[:] = [n for n in self.tree if id(n) not in layout.dead]
+        self._prune_unused_lib_symbols()
+        return {
+            "removed": wanted,
+            "units": len(nodes),
+            "cleaned_up": cleaned,
+            "warnings": list(warnings.values()) + layout.warnings,
+        }
 
     def add_two_pin_component(
         self,
@@ -960,6 +1016,261 @@ def _reference(symbol: sexpr.SExpr) -> str | None:
         if len(prop) >= 3 and prop[1] == "Reference":
             return str(prop[2])
     return None
+
+
+def _instance_references(symbol: sexpr.SExpr) -> list[str]:
+    """The reference of each use of the sheet, from the symbol's `instances` block."""
+    return [str(n[1]) for n in sexpr.find_all(sexpr.child(symbol, "instances") or [], "reference")]
+
+
+def _all_references(symbol: sexpr.SExpr) -> set[str]:
+    """Every name the symbol goes by: its Reference field and each use's annotation."""
+    shown = _reference(symbol)
+    return set(_instance_references(symbol)) | ({shown} if shown else set())
+
+
+def _embedded_definitions(tree: sexpr.SExpr) -> dict[str, sexpr.SExpr]:
+    """lib_id -> the definition copy the file embeds, which is what KiCad draws."""
+    return {
+        str(n[1]): n
+        for n in sexpr.children(sexpr.child(tree, "lib_symbols") or [], "symbol")
+        if len(n) > 1
+    }
+
+
+def _pin_points(
+    index: SymbolIndex, embedded: dict[str, sexpr.SExpr], symbol: sexpr.SExpr
+) -> list[tuple[float, float]] | None:
+    """Canvas connection points of one placed unit; None if its pins are unknown.
+
+    From the embedded copy first, so a part whose library is gone still has pins.
+    """
+    lib_id = str(sexpr.value(symbol, "lib_id", ""))
+    at = sexpr.values(symbol, "at")
+    if not lib_id or not at:
+        return None
+    unit = int(sexpr.value(symbol, "unit", 1) or 1)
+    try:
+        definition = embedded.get(lib_id)
+        pins = definition_pins(definition) if definition is not None else index.pins(lib_id)
+    except KicadMcpError:
+        return None
+    mirror = sexpr.value(symbol, "mirror")
+    placed = PlacedSymbol(
+        "", "", lib_id, x=float(at[0]), y=float(at[1]),
+        angle=float(at[2]) if len(at) > 2 else 0.0, unit=unit, uuid="",
+        mirror=str(mirror) if mirror else None,
+    )
+    return [placed.pin_point(p) for p in pins if p.unit in (0, unit)]
+
+
+def _wire_ends(wire: sexpr.SExpr) -> list[tuple[float, float]]:
+    pts = sexpr.child(wire, "pts")
+    return [(float(xy[1]), float(xy[2])) for xy in sexpr.children(pts or [], "xy")]
+
+
+def _on_segment(p: tuple[float, float], a: tuple[float, float], b: tuple[float, float]) -> bool:
+    """Whether `p` lies on the segment a-b, short of both ends."""
+    if p in (a, b):
+        return False
+    length = math.hypot(b[0] - a[0], b[1] - a[1])
+    if length == 0:
+        return False
+    cross = (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+    return (
+        abs(cross) / length <= 0.01
+        and min(a[0], b[0]) - 0.01 <= p[0] <= max(a[0], b[0]) + 0.01
+        and min(a[1], b[1]) - 0.01 <= p[1] <= max(a[1], b[1]) + 0.01
+    )
+
+
+Key = tuple[float, float]
+
+
+class _Layout:
+    """How what is left on a sheet connects, to find what a removal left loose.
+
+    Built from the tree once the removed symbols are gone. A wire joins its
+    two ends and anything lying along it. Power symbols and PWR_FLAGs
+    (references starting with "#"), labels, junctions and no-connects only
+    name or decorate a net; a net that reaches no other pin is not there
+    for anything. Nodes to delete collect in `dead`.
+    """
+
+    LABELS = ("label", "global_label", "hierarchical_label")
+
+    def __init__(self, tree: sexpr.SExpr, index: SymbolIndex, embedded: dict[str, sexpr.SExpr]) -> None:
+        self.dead: set[int] = set()
+        self.warnings: list[str] = []
+        self.wires = list(sexpr.children(tree, "wire"))
+        self.ends: dict[int, tuple[Key, Key]] = {}
+        self.wires_at: dict[Key, list[sexpr.SExpr]] = defaultdict(list)
+        for wire in self.wires:
+            pts = [_key(p) for p in _wire_ends(wire)]
+            if len(pts) == 2 and pts[0] != pts[1]:
+                self.ends[id(wire)] = (pts[0], pts[1])
+                for p in pts:
+                    self.wires_at[p].append(wire)
+        self.wires = [w for w in self.wires if id(w) in self.ends]
+
+        self.pins: dict[Key, list[sexpr.SExpr]] = defaultdict(list)
+        for symbol in sexpr.children(tree, "symbol"):
+            for p in _pin_points(index, embedded, symbol) or []:
+                self.pins[_key(p)].append(symbol)
+        self.items: dict[str, dict[Key, list[sexpr.SExpr]]] = {}
+        for kind in (*self.LABELS, "junction", "no_connect"):
+            self.items[kind] = defaultdict(list)
+            for node in sexpr.children(tree, kind):
+                at = sexpr.values(node, "at")
+                if at:
+                    self.items[kind][_key((float(at[0]), float(at[1])))].append(node)
+        # Sheet pins and bus entries: connections to elsewhere, never loose.
+        self.fixed: set[Key] = set()
+        for sheet in sexpr.children(tree, "sheet"):
+            for pin in sexpr.children(sheet, "pin"):
+                at = sexpr.values(pin, "at")
+                if at:
+                    self.fixed.add(_key((float(at[0]), float(at[1]))))
+        for entry in sexpr.children(tree, "bus_entry"):
+            at, size = sexpr.values(entry, "at"), sexpr.values(entry, "size")
+            if at and size:
+                x, y = float(at[0]), float(at[1])
+                self.fixed |= {_key((x, y)), _key((x + float(size[0]), y + float(size[1])))}
+
+        self.points: set[Key] = set(self.pins) | self.fixed
+        for by_point in self.items.values():
+            self.points |= set(by_point)
+        self._rows: dict[float, list[Key]] = defaultdict(list)
+        self._cols: dict[float, list[Key]] = defaultdict(list)
+        for p in self.points:
+            self._rows[p[1]].append(p)
+            self._cols[p[0]].append(p)
+
+    def clean_up(self, seeds: list[Key]) -> dict:
+        """Remove what the pins at `seeds` leave loose; report what went."""
+        touched = set(seeds)
+        loose = self._prune_wires(seeds, touched)
+        report: dict = {"wires": loose, "labels": [], "power_symbols": [], "no_connects": 0, "junctions": 0}
+
+        for keys in self._components(touched):
+            symbols = {id(s): s for k in keys for s in self.pins.get(k, [])}
+            labels = {kind: [n for k in keys for n in self.items[kind].get(k, [])] for kind in self.LABELS}
+            if keys & self.fixed or any(not (_reference(s) or "").startswith("#") for s in symbols.values()):
+                continue
+            if labels["hierarchical_label"]:
+                names = ", ".join(sorted({str(n[1]) for n in labels["hierarchical_label"]}))
+                self.warnings.append(
+                    f"Hierarchical label {names} no longer reaches any pin on this sheet; kept, "
+                    "since the parent sheet's pin of that name refers to it."
+                )
+                continue
+            names = {str(n[1]) for kind in ("label", "global_label") for n in labels[kind]}
+            names |= {v for s in symbols.values() if (v := _property_text(s, "Value")) != "PWR_FLAG"}
+            if len(names) > 1:
+                self.warnings.append(
+                    f"{' and '.join(sorted(names))} stay joined by wiring that no longer reaches "
+                    "any pin; kept, since removing it would split those nets. Delete it in KiCad "
+                    "if they should not be one net."
+                )
+                continue
+
+            for wire in self.wires:
+                if id(wire) not in self.dead and self.ends[id(wire)][0] in keys:
+                    self.dead.add(id(wire))
+                    report["wires"] += 1
+            for kind in self.LABELS:
+                for node in labels[kind]:
+                    self.dead.add(id(node))
+                    report["labels"].append(str(node[1]))
+            for symbol in symbols.values():
+                self.dead.add(id(symbol))
+                report["power_symbols"].append(_reference(symbol))
+            for kind, field in (("no_connect", "no_connects"), ("junction", "junctions")):
+                for node in (n for k in keys for n in self.items[kind].get(k, [])):
+                    self.dead.add(id(node))
+                    report[field] += 1
+
+        for key in touched:
+            for node in self.items["junction"].get(key, []):
+                if id(node) not in self.dead and self._connections(key) < 3:
+                    self.dead.add(id(node))
+                    report["junctions"] += 1
+        return report
+
+    def _live_wires(self) -> list[sexpr.SExpr]:
+        return [w for w in self.wires if id(w) not in self.dead]
+
+    def _along(self, wire: sexpr.SExpr) -> list[Key]:
+        """Points of interest lying on `wire`, short of its ends."""
+        a, b = self.ends[id(wire)]
+        if a[1] == b[1]:
+            candidates = self._rows.get(a[1], [])
+        elif a[0] == b[0]:
+            candidates = self._cols.get(a[0], [])
+        else:
+            candidates = self.points
+        return [p for p in candidates if _on_segment(p, a, b)]
+
+    def _held(self, key: Key) -> bool:
+        """Whether something other than wire ends connects at `key`."""
+        if key in self.pins or key in self.fixed or any(key in self.items[k] for k in self.LABELS):
+            return True
+        return any(_on_segment(key, *self.ends[id(w)]) for w in self._live_wires())
+
+    def _prune_wires(self, seeds: list[Key], touched: set[Key]) -> int:
+        """Remove wires left with an end touching nothing, run by run."""
+        count = 0
+        queue = list(seeds)
+        while queue:
+            key = queue.pop()
+            ends = [w for w in self.wires_at.get(key, []) if id(w) not in self.dead]
+            if len(ends) != 1 or self._held(key):
+                continue
+            wire = ends[0]
+            self.dead.add(id(wire))
+            count += 1
+            a, b = self.ends[id(wire)]
+            far = b if a == key else a
+            touched.add(far)
+            touched.update(self._along(wire))
+            queue.append(far)
+        return count
+
+    def _components(self, touched: set[Key]) -> list[set[Key]]:
+        """The connected groups of points that include a touched point."""
+        parent: dict[Key, Key] = {}
+
+        def find(k: Key) -> Key:
+            parent.setdefault(k, k)
+            while parent[k] != k:
+                parent[k] = parent[parent[k]]
+                k = parent[k]
+            return k
+
+        for wire in self._live_wires():
+            a, b = self.ends[id(wire)]
+            for p in (b, *self._along(wire)):
+                parent[find(p)] = find(a)
+        groups: dict[Key, set[Key]] = defaultdict(set)
+        for k in list(parent):
+            groups[find(k)].add(k)
+        roots = {find(k) for k in touched}
+        return [groups[r] or {r} for r in roots]
+
+    def _connections(self, key: Key) -> int:
+        """How many wire ends, wires passing through and pins meet at `key`."""
+        live = self._live_wires()
+        ends = sum(key in self.ends[id(w)] for w in live)
+        through = sum(_on_segment(key, *self.ends[id(w)]) for w in live)
+        pins = len(self.pins.get(key, [])) + (key in self.fixed)
+        return ends + 2 * through + pins
+
+
+def _property_text(symbol: sexpr.SExpr, name: str) -> str:
+    for prop in sexpr.children(symbol, "property"):
+        if len(prop) >= 3 and prop[1] == name:
+            return str(prop[2])
+    return ""
 
 
 def _key(point: tuple[float, float]) -> tuple[float, float]:

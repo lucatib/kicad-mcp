@@ -647,6 +647,35 @@ def set_symbol_fields(
 
 @mcp.tool()
 @tool_result
+def remove_symbols(
+    path: str,
+    references: list[str],
+    dry_run: bool = False,
+    project_dir: str | None = None,
+) -> dict:
+    """Delete placed symbols from a .kicad_sch, with what was there only to connect them.
+
+    Every unit of each part goes; on a sheet used more than once it goes
+    from every use (reported in warnings). Also removed, and listed under
+    cleaned_up: wire runs that end in nothing once the part is gone, and
+    labels, power symbols, PWR_FLAGs, no-connects and junctions no longer
+    reaching any pin. Anything still wired to another part or a sheet pin
+    stays. Kept and reported instead: wiring that joins two net names
+    (removing it would split those nets) and hierarchical labels (the parent
+    sheet's pin refers to them). An unknown reference removes nothing.
+    `dry_run` reports the same without writing.
+    """
+    editor = SchematicEditor.load(path)
+    result = editor.remove_symbols(symbol_index(project_dir), references)
+    if not dry_run:
+        editor.save()
+    result["written"] = not dry_run
+    result["schematic"] = str(editor.path)
+    return result
+
+
+@mcp.tool()
+@tool_result
 def route_nets(
     path: str,
     nets: list[str] | None = None,

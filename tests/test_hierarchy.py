@@ -176,6 +176,17 @@ class TestInstancePaths:
         _edit(sub, lambda e: e.set_fields(first, {"Reference": "R50"}))
         assert [r for _, r in _instances(sub, "R50")[1]] == ["R50", second]
 
+    def test_removing_from_a_reused_sheet_removes_every_use_and_says_so(self, install, index, tmp_path):
+        root, sub, _, _ = _project(tmp_path, uses=2)
+        res = _edit(sub, lambda e: e.place_symbol(index, RES, {}))
+        first, second = (i["reference"] for i in res["instances"])
+
+        out = _edit(sub, lambda e: e.remove_symbols(index, [second]))
+
+        assert any(first in w and second in w for w in out["warnings"])
+        netlist, _ = _nets(install, root)
+        assert netlist["components"] == []
+
     def test_standalone_file_keeps_its_own_uuid_path(self, index, tmp_path):
         alone = tmp_path / "alone.kicad_sch"
         SchematicBuilder("x").write(alone)

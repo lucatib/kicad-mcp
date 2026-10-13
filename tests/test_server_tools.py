@@ -67,3 +67,26 @@ def test_footprint_tools_are_registered_and_answer():
     assert "Converter_ACDC:Converter_ACDC_Hi-Link_HLK-PMxx" in [h["lib_id"] for h in hits["results"]]
     info = server.get_library_footprint("Converter_ACDC:Converter_ACDC_Hi-Link_HLK-PMxx")
     assert info["pad_count"] == 4
+
+
+def test_remove_symbols_dry_run_reports_without_writing(sch):
+    before = sch.read_text(encoding="utf-8")
+    res = server.remove_symbols(str(sch), ["U1"], dry_run=True)
+    assert "error" not in res, res
+    assert res["removed"] == ["U1"]
+    assert res["written"] is False
+    assert res["cleaned_up"]["power_symbols"], "reports what would go"
+    assert sch.read_text(encoding="utf-8") == before
+
+
+def test_remove_symbols_tool_writes(sch):
+    res = server.remove_symbols(str(sch), ["U1"])
+    assert "error" not in res, res
+    assert res["written"] is True
+    assert server.list_schematic_symbols(str(sch))["count"] == 0
+
+
+def test_remove_symbols_unknown_reference_is_an_error_not_an_exception(sch):
+    res = server.remove_symbols(str(sch), ["J99"])
+    assert res["error"] == "ToolInputError"
+    assert "J99" in res["message"]

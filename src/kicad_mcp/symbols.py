@@ -328,21 +328,26 @@ class SymbolIndex:
         return merged
 
     def pins(self, lib_id: str) -> list[PinInfo]:
-        """Pins of a symbol, gathered from its unit sub-symbols.
+        """Pins of a symbol; see `definition_pins`."""
+        return definition_pins(self.definition(lib_id))
 
-        KiCad stores pins on child symbols named `<Name>_<unit>_<bodystyle>`,
-        not on the parent, so the parent alone always looks pinless.
-        """
-        node = self.definition(lib_id)
-        out: list[PinInfo] = []
-        for sub in sexpr.children(node, "symbol"):
-            sub_name = sub[1] if len(sub) > 1 and isinstance(sub[1], str) else ""
-            m = re.search(r"_(\d+)_(\d+)$", str(sub_name))
-            unit = int(m.group(1)) if m else 1
-            for pin in sexpr.children(sub, "pin"):
-                out.append(_pin_info(pin, unit))
-        out.sort(key=lambda p: (p.unit, _natural_key(p.number)))
-        return out
+
+def definition_pins(node: sexpr.SExpr) -> list[PinInfo]:
+    """Pins of a symbol definition, gathered from its unit sub-symbols.
+
+    KiCad stores pins on child symbols named `<Name>_<unit>_<bodystyle>`,
+    not on the parent, so the parent alone always looks pinless. Works on a
+    library's definition and on the copy a schematic embeds alike.
+    """
+    out: list[PinInfo] = []
+    for sub in sexpr.children(node, "symbol"):
+        sub_name = sub[1] if len(sub) > 1 and isinstance(sub[1], str) else ""
+        m = re.search(r"_(\d+)_(\d+)$", str(sub_name))
+        unit = int(m.group(1)) if m else 1
+        for pin in sexpr.children(sub, "pin"):
+            out.append(_pin_info(pin, unit))
+    out.sort(key=lambda p: (p.unit, _natural_key(p.number)))
+    return out
 
 
 def _natural_key(text: str):

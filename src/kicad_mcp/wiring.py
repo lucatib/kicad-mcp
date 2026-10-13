@@ -23,7 +23,7 @@ from pathlib import Path
 
 from . import cli as kcli
 from . import sexpr
-from .editor import SchematicEditor, _bounds, _local_points, _text_box
+from .editor import SchematicEditor, _bounds, _local_points, _text_box, _wire_ends
 from .errors import ToolInputError
 from .generator import GRID, PlacedSymbol
 from .router import Cell, Dir, Grid, route_tree, segments
@@ -445,8 +445,3 @@ def _key(p: Point) -> tuple[float, float]:
 def _at(node) -> Point:
     at = sexpr.values(node, "at")
     return (float(at[0]), float(at[1]))
-
-
-def _wire_ends(wire) -> list[Point]:
-    pts = sexpr.child(wire, "pts")
-    return [(float(xy[1]), float(xy[2])) for xy in sexpr.children(pts or [], "xy")]

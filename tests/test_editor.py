@@ -193,6 +193,175 @@ class TestAddDecouplingCapacitors:
         assert len(set(xs)) == 2
 
 
+def _counts(path):
+    """How many of each kind of item the file holds, embedded library copies included."""
+    from kicad_mcp import sexpr
+
+    tree = sexpr.parse(path.read_text(encoding="utf-8"))
+    kinds = ("symbol", "wire", "label", "global_label", "hierarchical_label", "junction", "no_connect")
+    counts = {kind: len(list(sexpr.children(tree, kind))) for kind in kinds}
+    counts["lib_symbols"] = len(list(sexpr.children(sexpr.child(tree, "lib_symbols") or [], "symbol")))
+    return counts
+
+
+def _connectivity(install, path):
+    return {
+        net.get("name"): frozenset((n.get("ref"), n.get("pin")) for n in net.findall("node"))
+        for net in _netlist(install, path).findall("./nets/net")
+    }
+
+
+def _draw_wires(path, *points):
+    """A hand-drawn wire through `points`, one segment per pair, as a user draws in KiCad."""
+    editor = SchematicEditor.load(path)
+    builder = editor._builder()
+    for a, b in zip(points, points[1:]):
+        builder.add_wire(a, b)
+    editor._merge(builder)
+    editor.save()
+
+
+def _pin(editor, index, reference, number):
+    sym, = editor.placements(index, reference)
+    return sym.pin_point(next(p for p in sym.pins if p.number == number))
+
+
+def _relabel(path, text, kind=None, alias=None):
+    """Turn the label `text` into another `kind`, or put an `alias` label on its point."""
+    import copy
+
+    from kicad_mcp import sexpr
+    from kicad_mcp.sexpr import Sym
+
+    tree = sexpr.parse(path.read_text(encoding="utf-8"))
+    label = next(n for n in sexpr.children(tree, "label") if n[1] == text)
+    if kind:
+        label[0] = Sym(kind)
+        label.insert(2, [Sym("shape"), Sym("input")])
+    if alias:
+        twin = copy.deepcopy(label)
+        twin[1] = alias
+        sexpr.child(twin, "uuid")[1] = "00000000-0000-0000-0000-00000000a11a"
+        tree.insert(tree.index(label) + 1, twin)
+    path.write_text(sexpr.dumps(tree), encoding="utf-8")
+
+
+def _labels(path, kind="label"):
+    from kicad_mcp import sexpr
+
+    tree = sexpr.parse(path.read_text(encoding="utf-8"))
+    return sorted(str(n[1]) for n in sexpr.children(tree, kind))
+
+
+class TestRemoveSymbols:
+    def test_placing_then_removing_restores_the_sheet(self, install, index, base_sch):
+        before, nets_before = _counts(base_sch), _connectivity(install, base_sch)
+        editor = SchematicEditor.load(base_sch)
+        editor.place_symbol(index, CONN, {"1": "LED", "2": "NEW_NET"}, reference="J1")
+        editor.save()
+
+        editor = SchematicEditor.load(base_sch)
+        res = editor.remove_symbols(index, ["J1"])
+        editor.save()
+
+        assert res["removed"] == ["J1"]
+        assert sorted(res["cleaned_up"]["labels"]) == ["LED", "NEW_NET"]
+        assert _counts(base_sch) == before, "its stubs, labels and library copy go with it"
+        assert _connectivity(install, base_sch) == nets_before
+        assert _labels(base_sch) == ["LED"], "U1's own LED label still serves U1"
+
+    def test_a_decoupling_cap_takes_its_rail_symbols_with_it(self, install, index, base_sch):
+        before = _counts(base_sch)
+        cap = add_decoupling_capacitors(index, base_sch, rails=["power:+3V3"])["added"][0]["reference"]
+
+        editor = SchematicEditor.load(base_sch)
+        res = editor.remove_symbols(index, [cap])
+        editor.save()
+
+        assert len(res["cleaned_up"]["power_symbols"]) == 2
+        assert _counts(base_sch) == before
+        assert "Failed to load" not in _erc_text(install, base_sch)
+
+    def test_removing_the_only_part_clears_everything_hung_off_it(self, install, index, base_sch):
+        editor = SchematicEditor.load(base_sch)
+        editor.remove_symbols(index, ["U1"])
+        editor.save()
+
+        counts = _counts(base_sch)
+        assert counts == dict.fromkeys(counts, 0), "power symbols, flags, junctions, wires, labels"
+        assert "Failed to load" not in _erc_text(install, base_sch)
+
+    def test_a_hand_drawn_wire_to_the_part_goes_with_it(self, index, base_sch):
+        editor = SchematicEditor.load(base_sch)
+        editor.place_symbol(index, CONN, {}, reference="J1", at=(38.1, 38.1))
+        editor.place_symbol(index, CONN, {}, reference="J2", at=(63.5, 63.5))
+        editor.save()
+        before = _counts(base_sch)
+        a, b = _pin(editor, index, "J1", "1"), _pin(editor, index, "J2", "1")
+        _draw_wires(base_sch, a, (a[0] - 7.62, a[1]), (a[0] - 7.62, b[1]), b)
+
+        editor = SchematicEditor.load(base_sch)
+        res = editor.remove_symbols(index, ["J1"])
+        editor.save()
+
+        assert res["cleaned_up"]["wires"] == 3, "every segment, around both corners"
+        assert _counts(base_sch) == {**before, "symbol": before["symbol"] - 1}
+        assert "J2" in SchematicEditor.load(base_sch).references()
+
+    def test_a_rail_symbol_still_wired_to_another_part_is_kept(self, install, index, base_sch):
+        from kicad_mcp import sexpr
+
+        editor = SchematicEditor.load(base_sch)
+        gnd = next(s for s in sexpr.children(editor.tree, "symbol")
+                   if sexpr.value(s, "lib_id") == "power:GND")
+        gnd_at = tuple(float(v) for v in sexpr.values(gnd, "at")[:2])
+        editor.place_symbol(index, CONN, {}, reference="J1", at=(38.1, 38.1))
+        editor.save()
+        pin = _pin(editor, index, "J1", "1")
+        _draw_wires(base_sch, pin, (pin[0] - 7.62, pin[1]), (pin[0] - 7.62, gnd_at[1]), gnd_at)
+
+        editor = SchematicEditor.load(base_sch)
+        editor.remove_symbols(index, ["U1"])
+        editor.save()
+
+        assert ("J1", "1") in _connectivity(install, base_sch)["GND"]
+        assert _counts(base_sch)["junction"] == 0, "no junction is left where only two wires meet"
+
+    def test_wiring_that_joins_two_net_names_is_kept_and_reported(self, index, base_sch):
+        editor = SchematicEditor.load(base_sch)
+        editor.place_symbol(index, CONN, {"1": "NET_A"}, reference="J1")
+        editor.save()
+        _relabel(base_sch, "NET_A", alias="NET_B")
+
+        editor = SchematicEditor.load(base_sch)
+        res = editor.remove_symbols(index, ["J1"])
+        editor.save()
+
+        assert {"NET_A", "NET_B"} <= set(_labels(base_sch)), "removing them would split two nets"
+        assert any("NET_A" in w and "NET_B" in w for w in res["warnings"])
+
+    def test_a_hierarchical_label_is_kept_and_reported(self, index, base_sch):
+        editor = SchematicEditor.load(base_sch)
+        editor.place_symbol(index, CONN, {"1": "TO_PARENT"}, reference="J1")
+        editor.save()
+        _relabel(base_sch, "TO_PARENT", kind="hierarchical_label")
+
+        editor = SchematicEditor.load(base_sch)
+        res = editor.remove_symbols(index, ["J1"])
+        editor.save()
+
+        assert _labels(base_sch, "hierarchical_label") == ["TO_PARENT"], "the parent's sheet pin needs it"
+        assert any("TO_PARENT" in w for w in res["warnings"])
+
+    def test_unknown_reference_is_refused_and_nothing_removed(self, index, base_sch):
+        editor = SchematicEditor.load(base_sch)
+        with pytest.raises(ToolInputError) as exc:
+            editor.remove_symbols(index, ["U1", "J99"])
+        assert "J99" in exc.value.message
+        assert exc.value.remedy
+        assert "U1" in editor.references()
+
+
 def _footprint_of(path, reference):
     from kicad_mcp import sexpr
 
