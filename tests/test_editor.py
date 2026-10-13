@@ -362,6 +362,88 @@ class TestRemoveSymbols:
         assert "U1" in editor.references()
 
 
+class TestRenameLabels:
+    def _place(self, index, path, reference, assignments):
+        editor = SchematicEditor.load(path)
+        editor.place_symbol(index, CONN, assignments, reference=reference)
+        editor.save()
+
+    def _rename(self, path, renames):
+        editor = SchematicEditor.load(path)
+        res = editor.rename_labels(renames)
+        editor.save()
+        return res
+
+    def test_renames_every_label_of_the_net(self, install, index, base_sch):
+        self._place(index, base_sch, "J1", {"1": "LED"})
+
+        res = self._rename(base_sch, {"LED": "STATUS"})
+
+        assert res["renamed"] == [{"from": "LED", "to": "STATUS", "labels": 2}]
+        nets = _connectivity(install, base_sch)
+        assert "/LED" not in nets
+        assert {r for r, _ in nets["/STATUS"]} == {"U1", "J1"}
+
+    def test_shifts_a_numbered_series_in_one_call(self, install, index, base_sch):
+        # The old and new names overlap: IN3 and IN4 are both renamed and renamed to.
+        self._place(index, base_sch, "J1", {"1": "IN3", "2": "IN4", "3": "IN5"})
+        self._place(index, base_sch, "J2", {"1": "IN6"})
+
+        self._rename(base_sch, {"IN3": "IN1", "IN4": "IN2", "IN5": "IN3", "IN6": "IN4"})
+
+        nets = _connectivity(install, base_sch)
+        assert nets["/IN1"] == {("J1", "1")}
+        assert nets["/IN2"] == {("J1", "2")}
+        assert nets["/IN3"] == {("J1", "3")}
+        assert nets["/IN4"] == {("J2", "1")}
+        assert "/IN5" not in nets and "/IN6" not in nets
+
+    def test_swaps_two_names(self, install, index, base_sch):
+        self._place(index, base_sch, "J1", {"1": "A", "2": "B"})
+        self._rename(base_sch, {"A": "B", "B": "A"})
+        nets = _connectivity(install, base_sch)
+        assert (nets["/A"], nets["/B"]) == ({("J1", "2")}, {("J1", "1")})
+
+    @pytest.mark.parametrize("renames", [
+        {"OTHER": "LED"},  # LED is U1's net and is not being renamed away
+        {"OTHER": "X", "LED": "X"},  # two nets onto one name
+        {"OTHER": "GND"},  # a power net on the sheet
+    ])
+    def test_a_rename_that_would_join_two_nets_is_refused(self, index, base_sch, renames):
+        self._place(index, base_sch, "J1", {"1": "OTHER"})
+        before = base_sch.read_text(encoding="utf-8")
+        editor = SchematicEditor.load(base_sch)
+        with pytest.raises(ToolInputError) as exc:
+            editor.rename_labels(renames)
+        assert exc.value.remedy
+        assert _labels(base_sch) == ["LED", "OTHER"]
+        assert base_sch.read_text(encoding="utf-8") == before
+
+    def test_unknown_label_is_refused_and_nothing_renamed(self, base_sch):
+        editor = SchematicEditor.load(base_sch)
+        with pytest.raises(ToolInputError) as exc:
+            editor.rename_labels({"LED": "STATUS", "NOPE": "X"})
+        assert "NOPE" in exc.value.message
+        assert _labels(base_sch) == ["LED"]
+        assert [str(n[1]) for n in _label_nodes(editor)] == ["LED"]
+
+    def test_a_hierarchical_label_rename_warns_about_the_parent_pin(self, index, base_sch):
+        self._place(index, base_sch, "J1", {"1": "TO_PARENT"})
+        _relabel(base_sch, "TO_PARENT", kind="hierarchical_label")
+
+        res = self._rename(base_sch, {"TO_PARENT": "UP"})
+
+        assert _labels(base_sch, "hierarchical_label") == ["UP"]
+        assert any("TO_PARENT" in w and "sheet pin" in w for w in res["warnings"])
+
+
+def _label_nodes(editor):
+    from kicad_mcp import sexpr
+
+    return [n for kind in ("label", "global_label", "hierarchical_label")
+            for n in sexpr.children(editor.tree, kind)]
+
+
 def _footprint_of(path, reference):
     from kicad_mcp import sexpr
 

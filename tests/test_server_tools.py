@@ -90,3 +90,23 @@ def test_remove_symbols_unknown_reference_is_an_error_not_an_exception(sch):
     res = server.remove_symbols(str(sch), ["J99"])
     assert res["error"] == "ToolInputError"
     assert "J99" in res["message"]
+
+
+def test_rename_labels_dry_run_reports_without_writing(sch):
+    before = sch.read_text(encoding="utf-8")
+    res = server.rename_labels(str(sch), {"LED": "STATUS"}, dry_run=True)
+    assert "error" not in res, res
+    assert res["renamed"] == [{"from": "LED", "to": "STATUS", "labels": 1}]
+    assert res["written"] is False
+    assert sch.read_text(encoding="utf-8") == before
+
+
+def test_rename_labels_tool_writes(sch):
+    res = server.rename_labels(str(sch), {"LED": "STATUS"})
+    assert res["written"] is True
+    assert '(label "STATUS"' in sch.read_text(encoding="utf-8")
+
+
+def test_rename_labels_collision_is_an_error_not_an_exception(sch):
+    res = server.rename_labels(str(sch), {"LED": "GND"})
+    assert res["error"] == "ToolInputError"

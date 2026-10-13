@@ -109,7 +109,7 @@ the client configuration that is an `env` entry:
 
 **Editing existing schematics** — `add_symbol_to_schematic`, `label_pins`,
 `set_symbol_fields`, `mark_pins_unused`, `rewire_power_symbol`,
-`add_decoupling_capacitors`, `remove_symbols`, `route_nets`
+`add_decoupling_capacitors`, `remove_symbols`, `rename_labels`, `route_nets`
 
 **Escape hatch** — `run_kicad_script`
 
@@ -193,6 +193,20 @@ reported in `warnings` instead: wiring that joins two net names, since removing
 it would split those nets, and hierarchical labels, which the parent sheet's pin
 refers to. On a sheet used more than once the part goes from every use. An
 unknown reference removes nothing; `dry_run` reports without writing.
+
+### Renaming nets: `rename_labels`
+
+```json
+{"path": "C:/proj/inputs.kicad_sch", "renames": {"IN3": "IN1", "IN4": "IN2", "IN5": "IN3", "IN6": "IN4"}}
+```
+
+Every label of each name is renamed, local, global and hierarchical, all at
+once: a numbered series can shift onto itself and two names can swap. A rename
+that would join two nets is refused and nothing is written: onto a name another
+label on the sheet keeps, onto a power net, or two names onto one. Only this
+sheet changes, so `warnings` says when a global label's old name stays on other
+sheets or its new one is already there, and when a hierarchical label leaves the
+parent's sheet pin on the old name.
 
 ### Drawing wires: `route_nets`
 

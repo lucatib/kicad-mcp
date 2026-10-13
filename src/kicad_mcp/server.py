@@ -676,6 +676,30 @@ def remove_symbols(
 
 @mcp.tool()
 @tool_result
+def rename_labels(path: str, renames: dict[str, str], dry_run: bool = False) -> dict:
+    """Rename nets on a .kicad_sch by renaming their labels, e.g. {"IN3": "IN1", "IN4": "IN2"}.
+
+    Every label of each name is renamed -- local, global and hierarchical --
+    all at once, so a numbered series can shift onto itself and two names
+    can swap. Refused, writing nothing: a name with no label on the sheet,
+    and any rename that would join two nets (onto a name another label on
+    the sheet keeps, onto a power net, or two names onto one). Only this
+    sheet changes: warnings say when a global label's old name stays on
+    other sheets or its new one is already there, and when a hierarchical
+    label leaves the parent's sheet pin on the old name. `dry_run` reports
+    without writing.
+    """
+    editor = SchematicEditor.load(path)
+    result = editor.rename_labels(renames)
+    if not dry_run:
+        editor.save()
+    result["written"] = not dry_run
+    result["schematic"] = str(editor.path)
+    return result
+
+
+@mcp.tool()
+@tool_result
 def route_nets(
     path: str,
     nets: list[str] | None = None,

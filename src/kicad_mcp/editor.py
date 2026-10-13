@@ -24,7 +24,7 @@ from .generator import (
     GRID, LABEL_STUB, Join, PlacedSymbol, SchematicBuilder, _local_points, _normalise_key,
     _property, _snap, classify_net,
 )
-from .schematic import Schematic
+from .schematic import LABEL_KINDS, Schematic
 from .sexpr import Sym
 from .symbols import PinInfo, SymbolIndex, definition_pins
 
@@ -823,6 +823,74 @@ class SchematicEditor:
             "warnings": list(warnings.values()) + layout.warnings,
         }
 
+    def rename_labels(self, renames: dict[str, str]) -> dict:
+        """Rename nets by renaming their labels on this sheet, of every kind.
+
+        All renames apply at once, so a series can shift onto itself (IN3 to
+        IN1 while IN5 becomes IN3) and two names can swap. Refused, changing
+        nothing: a name no label here has, and any rename that would join two
+        nets -- onto a name another label on this sheet keeps, onto a power
+        net, or two names onto one. Other sheets are not touched, so warnings
+        say when a global label's old name stays on other sheets (that net no
+        longer reaches this one) or its new name is already there (this sheet
+        joins it), and when a hierarchical label leaves the parent's sheet pin
+        on the old name.
+        """
+        renames = {str(old): str(new) for old, new in renames.items() if str(old) != str(new)}
+        by_name: dict[str, list[sexpr.SExpr]] = {}
+        for kind in LABEL_KINDS:
+            for node in sexpr.children(self.tree, kind):
+                by_name.setdefault(str(node[1]), []).append(node)
+        missing = [old for old in renames if old not in by_name]
+        if missing:
+            raise ToolInputError(
+                f"No label named {', '.join(missing)} in {self.path.name}; nothing was renamed.",
+                remedy="Call schematic_netlist to see the sheet's nets (a local label X shows as /X).",
+            )
+
+        targets: dict[str, list[str]] = {}
+        for old, new in renames.items():
+            targets.setdefault(new, []).append(old)
+        kept = set(by_name) - set(renames)
+        power = set(hierarchy.power_nets(self.tree)) | set(self.place.power_nets())
+        clashes = []
+        for new, olds in targets.items():
+            if not new.strip():
+                clashes.append(f"{olds[0]} would get an empty name")
+            elif len(olds) > 1:
+                clashes.append(f"{' and '.join(olds)} would all become {new}")
+            elif new in kept:
+                clashes.append(f"{olds[0]} would join {new}, a net this sheet already has")
+            elif new in power:
+                clashes.append(f"{olds[0]} would join the power net {new}")
+        if clashes:
+            raise ToolInputError(
+                f"Renaming would join nets in {self.path.name}: {'; '.join(clashes)}. Nothing was renamed.",
+                remedy="Pick a name not used on this sheet, or rename the other net too in the same call.",
+            )
+
+        renamed, warnings = [], []
+        for old, new in renames.items():
+            nodes = by_name[old]
+            for node in nodes:
+                node[1] = new
+            renamed.append({"from": old, "to": new, "labels": len(nodes)})
+            kinds = {n[0].name for n in nodes}
+            if "global_label" in kinds:
+                if sheets := self.place.sheets_with_label(old, "global_label"):
+                    warnings.append(
+                        f"{old} stays a global label on {', '.join(sheets)}, so that net no longer "
+                        f"reaches this sheet; rename it there too to keep them one net."
+                    )
+                if sheets := self.place.sheets_with_label(new, "global_label"):
+                    warnings.append(f"This sheet's {old} net joins the global net {new} of {', '.join(sheets)}.")
+            if "hierarchical_label" in kinds:
+                warnings.append(
+                    f"{old} is a hierarchical label: the parent sheet's sheet pin {old} keeps its "
+                    f"name and no longer connects; rename that pin to {new} in KiCad."
+                )
+        return {"renamed": renamed, "warnings": warnings}
+
     def add_two_pin_component(
         self,
         index: SymbolIndex,
@@ -1097,7 +1165,7 @@ class _Layout:
     for anything. Nodes to delete collect in `dead`.
     """
 
-    LABELS = ("label", "global_label", "hierarchical_label")
+    LABELS = LABEL_KINDS
 
     def __init__(self, tree: sexpr.SExpr, index: SymbolIndex, embedded: dict[str, sexpr.SExpr]) -> None:
         self.dead: set[int] = set()

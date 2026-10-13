@@ -314,6 +314,28 @@ class TestGlobalLabels:
         res = _edit(sub, lambda e: e.place_symbol(index, CONN, {"1": "DATA"}, reference="J1"))
         assert any("DATA" in w and "proj.kicad_sch" in w for w in res["warnings"])
 
+    def test_renaming_a_global_label_used_on_other_sheets_warns(self, install, index, tmp_path):
+        root, sub, _, _ = _project(tmp_path)
+        _edit(root, lambda e: e.place_symbol(index, RES, {"1": "SDA"}, reference="R1", global_nets=["SDA"]))
+        _edit(sub, lambda e: e.place_symbol(index, CONN, {"1": "SDA"}, reference="J1", global_nets=["SDA"]))
+
+        res = _edit(sub, lambda e: e.rename_labels({"SDA": "SDA_B"}))
+
+        assert any("SDA" in w and "proj.kicad_sch" in w for w in res["warnings"])
+        _, nets = _nets(install, root)
+        assert nets["SDA"] == {("R1", "1")} and nets["SDA_B"] == {("J1", "1")}
+
+    def test_renaming_onto_a_global_net_of_other_sheets_joins_it_and_says_so(self, install, index, tmp_path):
+        root, sub, _, _ = _project(tmp_path)
+        _edit(root, lambda e: e.place_symbol(index, RES, {"1": "SDA"}, reference="R1", global_nets=["SDA"]))
+        _edit(sub, lambda e: e.place_symbol(index, CONN, {"1": "OLD"}, reference="J1", global_nets=["OLD"]))
+
+        res = _edit(sub, lambda e: e.rename_labels({"OLD": "SDA"}))
+
+        assert any("joins" in w and "SDA" in w for w in res["warnings"])
+        _, nets = _nets(install, root)
+        assert nets["SDA"] == {("R1", "1"), ("J1", "1")}
+
     def test_local_nets_stay_local(self, install, index, tmp_path):
         root, sub, _, _ = _project(tmp_path)
         _edit(sub, lambda e: e.place_symbol(index, CONN, {"1": "LOCAL"}, reference="J1"))

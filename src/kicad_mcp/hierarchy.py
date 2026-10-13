@@ -64,9 +64,13 @@ class SheetPlace:
 
     def sheets_with_local_label(self, name: str) -> list[str]:
         """Other sheets (by file name) where `name` is a local label."""
+        return self.sheets_with_label(name, "label")
+
+    def sheets_with_label(self, name: str, kind: str) -> list[str]:
+        """Other sheets (by file name) with a `kind` label named `name`."""
         return sorted(
             path.name for path, tree in self.others.items()
-            if name in label_names(tree, "label")
+            if name in label_names(tree, kind)
         )
 
 
