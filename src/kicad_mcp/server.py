@@ -700,6 +700,33 @@ def rename_labels(path: str, renames: dict[str, str], dry_run: bool = False) -> 
 
 @mcp.tool()
 @tool_result
+def move_symbol_fields(
+    path: str,
+    reference: str,
+    fields: dict[str, dict],
+    unit: int | None = None,
+) -> dict:
+    """Move fields of an already-placed symbol, e.g. {"Reference": {"x": 120.65, "y": 60.96}, "Value": {"dy": 2.54}}.
+
+    Per field: absolute `x`/`y` in sheet mm (either alone keeps the other),
+    or a `dx`/`dy` offset from where it is, and optionally `orientation`,
+    "horizontal" or "vertical" -- how the text reads on the sheet, whatever
+    the symbol's rotation. Works on any field, hidden ones included. On a
+    multi-unit part an absolute position needs `unit`; offsets apply to
+    every unit unless one is given. The symbol is no longer marked
+    autoplaced, so KiCad keeps the new spots. A spot off the drawing area
+    or on the title block is written but warned. Nothing moves if any
+    request is invalid.
+    """
+    editor = SchematicEditor.load(path)
+    result = editor.move_fields(reference, fields, unit=unit)
+    editor.save()
+    result["schematic"] = str(editor.path)
+    return result
+
+
+@mcp.tool()
+@tool_result
 def route_nets(
     path: str,
     nets: list[str] | None = None,

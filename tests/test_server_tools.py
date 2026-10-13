@@ -110,3 +110,15 @@ def test_rename_labels_tool_writes(sch):
 def test_rename_labels_collision_is_an_error_not_an_exception(sch):
     res = server.rename_labels(str(sch), {"LED": "GND"})
     assert res["error"] == "ToolInputError"
+
+
+def test_move_symbol_fields_tool_writes(sch):
+    res = server.move_symbol_fields(str(sch), "U1", {"Reference": {"dx": 2.54}})
+    assert "error" not in res, res
+    assert res["moved"][0]["field"] == "Reference"
+
+
+def test_move_symbol_fields_unknown_field_is_an_error_not_an_exception(sch):
+    res = server.move_symbol_fields(str(sch), "U1", {"Nope": {"dx": 1}})
+    assert res["error"] == "ToolInputError"
+    assert "Reference" in res["message"], "names the fields it does have"

@@ -437,6 +437,119 @@ class TestRenameLabels:
         assert any("TO_PARENT" in w and "sheet pin" in w for w in res["warnings"])
 
 
+def _symbol_nodes(path, reference):
+    from kicad_mcp import sexpr
+
+    tree = sexpr.parse(path.read_text(encoding="utf-8"))
+    return [s for s in sexpr.children(tree, "symbol")
+            if any(p[1:3] == ["Reference", reference] for p in sexpr.children(s, "property"))]
+
+
+def _field_at(path, reference, name, unit=1):
+    from kicad_mcp import sexpr
+
+    node = next(s for s in _symbol_nodes(path, reference) if sexpr.value(s, "unit", 1) == unit)
+    prop = next(p for p in sexpr.children(node, "property") if p[1] == name)
+    return tuple(float(v) for v in sexpr.values(prop, "at"))
+
+
+def _edit_symbol(path, reference, fn):
+    """Change a placed symbol's node in the file, as a user might in KiCad."""
+    from kicad_mcp import sexpr
+
+    tree = sexpr.parse(path.read_text(encoding="utf-8"))
+    for symbol in list(sexpr.children(tree, "symbol")):
+        if any(p[1:3] == ["Reference", reference] for p in sexpr.children(symbol, "property")):
+            fn(tree, symbol)
+    path.write_text(sexpr.dumps(tree), encoding="utf-8")
+
+
+class TestMoveSymbolFields:
+    def _move(self, path, reference, fields, unit=None):
+        editor = SchematicEditor.load(path)
+        res = editor.move_fields(reference, fields, unit=unit)
+        editor.save()
+        return res
+
+    def test_moves_a_field_to_absolute_coordinates(self, install, base_sch):
+        res = self._move(base_sch, "U1", {"Reference": {"x": 120.65, "y": 60.96}})
+
+        assert _field_at(base_sch, "U1", "Reference")[:2] == (120.65, 60.96)
+        assert res["moved"][0]["to"] == {"x": 120.65, "y": 60.96}
+        assert "Failed to load" not in _erc_text(install, base_sch)
+
+    def test_nudges_a_field_by_an_offset(self, base_sch):
+        x, y, _ = _field_at(base_sch, "U1", "Value")
+        self._move(base_sch, "U1", {"Value": {"dy": 2.54}})
+        assert _field_at(base_sch, "U1", "Value")[:2] == (x, round(y + 2.54, 4))
+
+    def test_a_moved_field_is_no_longer_autoplaced(self, base_sch):
+        # KiCad re-places fields of a symbol marked autoplaced, undoing the move.
+        from kicad_mcp.sexpr import Sym
+
+        _edit_symbol(base_sch, "U1", lambda _, s: s.append([Sym("fields_autoplaced"), Sym("yes")]))
+        self._move(base_sch, "U1", {"Reference": {"dx": 2.54}})
+        assert "fields_autoplaced" not in str(_symbol_nodes(base_sch, "U1")[0])
+
+    @pytest.mark.parametrize("angle,orientation,stored", [
+        (0, "vertical", 90), (0, "horizontal", 0), (90, "vertical", 0), (90, "horizontal", 90),
+    ])
+    def test_orientation_is_how_it_reads_whatever_the_symbol_rotation(
+        self, index, base_sch, angle, orientation, stored
+    ):
+        # KiCad stores a field's angle relative to its symbol's rotation.
+        editor = SchematicEditor.load(base_sch)
+        editor.place_symbol(index, CONN, {}, reference="J1")
+        editor.save()
+        _orient(base_sch, "J1", angle)
+
+        self._move(base_sch, "J1", {"Reference": {"orientation": orientation}})
+
+        assert _field_at(base_sch, "J1", "Reference")[2] == stored
+
+    def test_absolute_position_on_a_multi_unit_part_needs_a_unit(self, base_sch):
+        import copy
+
+        from kicad_mcp import sexpr
+
+        def add_unit_2(tree, symbol):
+            twin = copy.deepcopy(symbol)
+            sexpr.child(twin, "unit")[1] = 2
+            sexpr.child(twin, "uuid")[1] = "00000000-0000-0000-0000-0000000000u2"
+            tree.insert(tree.index(symbol) + 1, twin)
+
+        _edit_symbol(base_sch, "U1", add_unit_2)
+        editor = SchematicEditor.load(base_sch)
+        with pytest.raises(ToolInputError) as exc:
+            editor.move_fields("U1", {"Reference": {"x": 100.0, "y": 50.0}})
+        assert "unit" in exc.value.remedy
+
+        self._move(base_sch, "U1", {"Reference": {"x": 100.0, "y": 50.0}}, unit=2)
+        assert _field_at(base_sch, "U1", "Reference", unit=2)[:2] == (100.0, 50.0)
+        assert _field_at(base_sch, "U1", "Reference", unit=1)[:2] != (100.0, 50.0)
+
+    @pytest.mark.parametrize("reference,fields,needle", [
+        ("U99", {"Reference": {"dx": 1}}, "U99"),
+        ("U1", {"MPN": {"dx": 1}}, "MPN"),
+        ("U1", {"Reference": {"x": 1, "dx": 1}}, "dx"),
+        ("U1", {"Reference": {"left": 1}}, "left"),
+        ("U1", {"Reference": {"orientation": "diagonal"}}, "diagonal"),
+    ])
+    def test_bad_requests_are_refused_and_nothing_moves(self, base_sch, reference, fields, needle):
+        before = base_sch.read_text(encoding="utf-8")
+        editor = SchematicEditor.load(base_sch)
+        with pytest.raises(ToolInputError) as exc:
+            editor.move_fields(reference, fields)
+        assert needle in exc.value.message
+        editor.save()
+        assert base_sch.read_text(encoding="utf-8") == before
+
+    def test_a_field_moved_off_the_page_is_written_but_warned(self, base_sch):
+        res = self._move(base_sch, "U1", {"Value": {"x": 1000.0, "y": 50.8}})
+        assert _field_at(base_sch, "U1", "Value")[:2] == (1000.0, 50.8)
+        assert res["warnings"]
+
+
 def _label_nodes(editor):
     from kicad_mcp import sexpr
 

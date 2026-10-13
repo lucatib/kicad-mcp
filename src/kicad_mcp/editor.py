@@ -665,6 +665,95 @@ class SchematicEditor:
             "warnings": warnings,
         }
 
+    def move_fields(self, reference: str, fields: dict[str, dict], unit: int | None = None) -> dict:
+        """Move fields of a placed symbol: Reference, Value, or any other.
+
+        Each field takes an absolute `x`/`y` in canvas mm (either alone keeps
+        the other) or a `dx`/`dy` offset, and optionally `orientation`,
+        "horizontal" or "vertical": how it reads on the sheet whatever the
+        symbol's rotation, which KiCad's stored angle is relative to. On a
+        part drawn as several units an absolute position needs `unit`;
+        offsets and orientation apply to every unit unless one is given. The
+        symbol stops being marked autoplaced, or KiCad would put the fields
+        back. A spot off the drawing area or on the title block is written but
+        warned. Nothing moves if any request is invalid.
+        """
+        nodes = [s for s in sexpr.children(self.tree, "symbol") if _reference(s) == reference]
+        if not nodes:
+            raise ToolInputError(
+                f"No symbol with reference {reference!r} in {self.path.name}.",
+                remedy="Call list_schematic_symbols to see what's placed.",
+            )
+        units = [int(sexpr.value(s, "unit", 1) or 1) for s in nodes]
+        if unit is not None:
+            nodes = [s for s, u in zip(nodes, units) if u == unit]
+            if not nodes:
+                raise ToolInputError(
+                    f"{reference} has no unit {unit} on {self.path.name}.",
+                    remedy=f"Its units here: {', '.join(map(str, sorted(units)))}.",
+                )
+
+        for name, spec in fields.items():
+            keys = set(spec)
+            unknown = sorted(keys - {"x", "y", "dx", "dy", "orientation"})
+            if unknown:
+                raise ToolInputError(
+                    f"Unknown key {', '.join(unknown)} for field {name}.",
+                    remedy="Use x/y (absolute, mm), dx/dy (offset, mm) and orientation.",
+                )
+            if keys & {"x", "y"} and keys & {"dx", "dy"}:
+                raise ToolInputError(
+                    f"Field {name}: give x/y or dx/dy, not both.",
+                    remedy="x/y place it absolutely; dx/dy move it from where it is.",
+                )
+            if spec.get("orientation", "horizontal") not in ("horizontal", "vertical"):
+                raise ToolInputError(
+                    f"Field {name}: orientation {spec['orientation']!r} is not horizontal or vertical.",
+                    remedy='Pass "horizontal" or "vertical".',
+                )
+            if keys & {"x", "y"} and len(nodes) > 1:
+                raise ToolInputError(
+                    f"{reference} is drawn as {len(nodes)} units, each with its own {name}.",
+                    remedy="Pass unit to place one unit's field, or use dx/dy to move them all.",
+                )
+            for node in nodes:
+                if _field(node, name) is None:
+                    have = ", ".join(str(p[1]) for p in sexpr.children(node, "property") if len(p) > 1)
+                    raise ToolInputError(
+                        f"{reference} has no field {name}; its fields: {have}.",
+                        remedy="Add the field with set_symbol_fields first.",
+                    )
+
+        area, title = self.drawing_area(), self.title_block()
+        moved, warnings = [], []
+        for node in nodes:
+            at_symbol = sexpr.values(node, "at")
+            turned = len(at_symbol) > 2 and int(round(float(at_symbol[2]))) % 180 == 90
+            for name, spec in fields.items():
+                at = sexpr.child(_field(node, name), "at")
+                old = (float(at[1]), float(at[2]))
+                x = round(float(spec.get("x", old[0] + float(spec.get("dx", 0)))), 4)
+                y = round(float(spec.get("y", old[1] + float(spec.get("dy", 0)))), 4)
+                at[1], at[2] = x, y
+                entry = {"field": name, "unit": int(sexpr.value(node, "unit", 1) or 1),
+                         "from": {"x": old[0], "y": old[1]}, "to": {"x": x, "y": y}}
+                if "orientation" in spec:
+                    stored = 90 if (spec["orientation"] == "vertical") != turned else 0
+                    if len(at) > 3:
+                        at[3] = stored
+                    else:
+                        at.append(stored)
+                    entry["orientation"] = spec["orientation"]
+                moved.append(entry)
+                if not _inside((x, y, x, y), area):
+                    warnings.append(f"{reference} {name} at ({x:g}, {y:g}) is outside the drawing area.")
+                elif title[0] <= x <= title[2] and title[1] <= y <= title[3]:
+                    warnings.append(f"{reference} {name} at ({x:g}, {y:g}) is on the title block.")
+            flag = sexpr.child(node, "fields_autoplaced")
+            if flag is not None:
+                node.remove(flag)
+        return {"reference": reference, "moved": moved, "warnings": warnings}
+
     def placements(self, index: SymbolIndex, reference: str) -> list[PlacedSymbol]:
         """Every placed unit of `reference`, with its orientation and own pins."""
         found = []
@@ -1084,6 +1173,10 @@ def _reference(symbol: sexpr.SExpr) -> str | None:
         if len(prop) >= 3 and prop[1] == "Reference":
             return str(prop[2])
     return None
+
+
+def _field(symbol: sexpr.SExpr, name: str) -> sexpr.SExpr | None:
+    return next((p for p in sexpr.children(symbol, "property") if len(p) >= 3 and p[1] == name), None)
 
 
 def _instance_references(symbol: sexpr.SExpr) -> list[str]:
