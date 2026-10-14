@@ -12,6 +12,7 @@ copying symbol definitions out of the library and renaming them to the
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -90,6 +91,9 @@ def _substitution_vars(install, project_dir: Path | None) -> dict[str, str]:
             / f"{major}.0" / "3rdparty"
         ),
     }
+    # Preferences > Configure Paths: where third-party tables get their
+    # ${WE_SYMBOL_DIR} and the like.
+    variables.update(_configured_paths(major))
     if project_dir:
         variables["KIPRJMOD"] = str(project_dir)
     # Real environment overrides our defaults, matching KiCad's own precedence.
@@ -99,9 +103,23 @@ def _substitution_vars(install, project_dir: Path | None) -> dict[str, str]:
     return variables
 
 
+def _configured_paths(major: int) -> dict[str, str]:
+    """The path variables set in KiCad's Configure Paths, from kicad_common.json."""
+    cfg = _config_dir(major)
+    if cfg is None:
+        return {}
+    try:
+        common = json.loads((cfg / "kicad_common.json").read_text(encoding="utf-8"))
+        configured = common["environment"]["vars"] or {}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+    return {str(k): str(v) for k, v in configured.items()} if isinstance(configured, dict) else {}
+
+
 def _expand(uri: str, variables: dict[str, str]) -> str:
+    """Substitute ${NAME}; like KiCad, any environment variable also counts."""
     def repl(m: re.Match) -> str:
-        return variables.get(m.group(1), m.group(0))
+        return variables.get(m.group(1)) or os.environ.get(m.group(1)) or m.group(0)
 
     return re.sub(r"\$\{([A-Za-z0-9_]+)\}", repl, uri)
 

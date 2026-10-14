@@ -114,6 +114,16 @@ the client configuration that is an `env` entry:
 
 **Escape hatch** — `run_kicad_script`
 
+### Libraries
+
+The symbol and footprint tools see what KiCad sees. They read the global
+library tables, including any tables nested in them, then the project's. A
+`${...}` in a table resolves as it does in KiCad: KiCad's own variables, then
+those set in Preferences > Configure Paths, then environment variables. So a
+vendor library whose tables use variables of its own, such as Würth
+Elektronik's `${WE_SYMBOL_DIR}`, shows up once those paths are configured. When
+two libraries share a nickname, the later one wins, as in KiCad 10.
+
 ### Generating a schematic from a pinout
 
 ```json
