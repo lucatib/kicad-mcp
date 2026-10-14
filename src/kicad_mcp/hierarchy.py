@@ -97,6 +97,20 @@ def locate(path: str | Path, tree: sexpr.SExpr | None = None) -> SheetPlace:
     return _standalone(path, tree)
 
 
+def find_project_dir(path: str | Path) -> Path | None:
+    """The folder of the `.kicad_pro` that `path` sits in or a few folders under.
+
+    `path` is a file or a folder. This is what KiCad calls ${KIPRJMOD}: where
+    the project's library tables live and what their entries are relative to.
+    """
+    path = Path(os.path.abspath(path))
+    start = path if path.is_dir() else path.parent
+    for folder in [start, *start.parents][: PROJECT_SEARCH_DEPTH + 1]:
+        if any(folder.glob("*.kicad_pro")):
+            return folder
+    return None
+
+
 def _walk(root: Path) -> tuple[dict[str, list[str]], dict[str, tuple[Path, sexpr.SExpr | None]]]:
     """Instance paths of every file under `root`, and each file parsed.
 

@@ -101,7 +101,8 @@ the client configuration that is an `env` entry:
 `list_schematic_symbols`, `find_project_files`, `schematic_netlist`, `run_erc`,
 `export_bom`, `export_schematic`, `run_drc`
 
-**Symbol libraries** — `list_symbol_libraries`, `search_symbols`, `get_symbol_pins`
+**Symbol libraries** — `list_symbol_libraries`, `search_symbols`, `get_symbol_pins`,
+`create_library_symbol`
 
 **Footprint libraries** — `search_footprints`, `get_library_footprint`
 
@@ -123,6 +124,43 @@ those set in Preferences > Configure Paths, then environment variables. So a
 vendor library whose tables use variables of its own, such as Würth
 Elektronik's `${WE_SYMBOL_DIR}`, shows up once those paths are configured. When
 two libraries share a nickname, the later one wins, as in KiCad 10.
+
+### Drawing a symbol: `create_library_symbol`
+
+For a part no library has, such as a module bought as a board:
+
+```json
+{
+  "project_dir": "C:/proj",
+  "library": "proj",
+  "name": "LevelShifter_BSS138_4ch",
+  "pins": [
+    {"number": "3", "name": "LV", "type": "power_in", "side": "left"},
+    {"number": "1", "name": "LV1", "type": "bidirectional", "side": "left"},
+    {"number": "9", "name": "HV", "type": "power_in", "side": "right"},
+    {"number": "7", "name": "HV1", "type": "bidirectional", "side": "right"}
+  ],
+  "description": "4-channel BSS138 level shifter module"
+}
+```
+
+The symbol is one rectangle with the pins on its sides. Each side's pins run in
+list order, from the top or from the left, 2.54 mm apart with every pin end on
+the grid, and the body is sized so no pin names touch. With no `side` on any pin,
+the first half go left and the rest right. `type` is a KiCad electrical type,
+`passive` when left out.
+
+`library` is a nickname. If the project's `sym-lib-table` has it, the symbol is
+added to that file. Otherwise it becomes `<project>/<library>.kicad_sym`,
+registered in the project's table, which is created if missing. Both files keep
+their existing text byte for byte. The tool refuses, writing nothing, when the
+library already has that name, when the nickname belongs to a global library
+(a project library would hide it), when a pin number repeats, or when the
+folder is in no KiCad project.
+
+The schematic tools find a project's own libraries from the schematic's path,
+so `add_symbol_to_schematic` places `proj:LevelShifter_BSS138_4ch` without a
+`project_dir`.
 
 ### Generating a schematic from a pinout
 

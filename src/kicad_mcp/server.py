@@ -20,12 +20,13 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 
 from . import cli as kcli
-from . import units
+from . import hierarchy, units
 from .discovery import find_install, find_installs
 from .editor import SchematicEditor, add_decoupling_capacitors as _add_decoupling_capacitors
 from .errors import KicadMcpError, NoEditorOpenError
 from .footprints import FootprintIndex, footprint_warning
 from .generator import generate_pinout_schematic
+from .library import create_symbol
 from .schematic import Schematic, find_project_schematics
 from .session import SESSION, translate
 from .symbols import SymbolIndex
@@ -68,9 +69,15 @@ def footprint_index(project_dir: str | None = None) -> FootprintIndex:
     return _FP_INDEX_CACHE[key]
 
 
-def _project_dir_of(path: str, project_dir: str | None) -> str | None:
-    """A schematic's own folder is its project: that is where fp-lib-table lives."""
-    return project_dir or str(Path(path).resolve().parent)
+def _project_dir_of(path: str, project_dir: str | None) -> str:
+    """The project a file belongs to, where its sym-lib-table and fp-lib-table live.
+
+    The folder of the .kicad_pro beside it or a few folders above; a file in
+    no project is its own, in its own folder.
+    """
+    if project_dir:
+        return project_dir
+    return str(hierarchy.find_project_dir(path) or Path(path).resolve().parent)
 
 
 def tool_result(fn):
@@ -480,6 +487,48 @@ def get_symbol_pins(lib_id: str, project_dir: str | None = None) -> dict:
     }
 
 
+@mcp.tool()
+@tool_result
+def create_library_symbol(
+    project_dir: str,
+    library: str,
+    name: str,
+    pins: list[dict],
+    reference: str = "U",
+    value: str | None = None,
+    footprint: str = "",
+    datasheet: str = "",
+    description: str = "",
+    keywords: str = "",
+) -> dict:
+    """Draw a new symbol into a project's own symbol library, for a part no library has (a module, a custom header).
+
+    `pins` lists {"number", "name", "type", "side"}: type is a KiCad electrical
+    type, passive when left out (input, output, bidirectional, tri_state,
+    power_in, power_out, open_collector, open_emitter, no_connect, free,
+    unspecified); side is left, right, top or bottom. Each side's pins run in
+    list order from the top, or from the left, 2.54 mm apart; with no side
+    on any pin the first half go left and the rest right. The body is a
+    rectangle sized to clear the pin names. `project_dir` is the project's
+    folder or any file in it. `library` is a nickname: one in the project's
+    sym-lib-table gets the symbol added; a new one becomes
+    <project>/<library>.kicad_sym, registered in the project's sym-lib-table.
+    Text already in either file is left as it was. Refused, writing nothing:
+    a name the library has, the nickname of a global library (a project one
+    would hide it), repeated pin numbers, and a folder in no KiCad project.
+    Place it with add_symbol_to_schematic as lib_id "<library>:<name>".
+    """
+    result = create_symbol(
+        install(), project_dir, library, name, pins, reference=reference, value=value,
+        footprint=footprint, datasheet=datasheet, description=description, keywords=keywords,
+    )
+    result["warnings"] = []
+    warning = footprint_warning(footprint_index(_project_dir_of(project_dir, None)), footprint)
+    if warning:
+        result["warnings"].append(warning)
+    return result
+
+
 # --- footprint libraries -------------------------------------------------
 
 
@@ -528,7 +577,7 @@ def create_pinout_schematic(
     hierarchy. The file is written directly and does not need KiCad running.
     """
     return generate_pinout_schematic(
-        symbol_index(project_dir), output, mcu_lib_id, assignments,
+        symbol_index(_project_dir_of(output, project_dir)), output, mcu_lib_id, assignments,
         title=title, mcu_reference=reference, mcu_footprint=footprint,
         connect_power=connect_power, global_nets=global_nets,
     )
@@ -576,7 +625,7 @@ def add_symbol_to_schematic(
     reference already used elsewhere, and a label that will not reach a
     same-named local label on another sheet.
     """
-    index = symbol_index(project_dir)
+    index = symbol_index(_project_dir_of(path, project_dir))
     editor = SchematicEditor.load(path)
     at = (x, y) if x is not None and y is not None else None
     result = editor.place_symbol(
@@ -611,7 +660,7 @@ def label_pins(
     label, no-connect or another pin on it is left alone and listed under
     already_connected, since a second label would short two nets together.
     """
-    index = symbol_index(project_dir)
+    index = symbol_index(_project_dir_of(path, project_dir))
     editor = SchematicEditor.load(path)
     result = editor.label_pins(index, reference, assignments, global_nets=global_nets)
     editor.save()
@@ -666,7 +715,7 @@ def remove_symbols(
     `dry_run` reports the same without writing.
     """
     editor = SchematicEditor.load(path)
-    result = editor.remove_symbols(symbol_index(project_dir), references)
+    result = editor.remove_symbols(symbol_index(_project_dir_of(path, project_dir)), references)
     if not dry_run:
         editor.save()
     result["written"] = not dry_run
@@ -700,7 +749,8 @@ def disconnect_pins(
     """
     editor = SchematicEditor.load(path)
     result = editor.disconnect_pins(
-        symbol_index(project_dir), reference, pin_numbers=pin_numbers, name_contains=name_contains,
+        symbol_index(_project_dir_of(path, project_dir)), reference,
+        pin_numbers=pin_numbers, name_contains=name_contains,
     )
     if not dry_run:
         editor.save()
@@ -804,7 +854,7 @@ def route_nets(
     `dry_run` runs the same checks without writing.
     """
     return wiring.route_and_verify(
-        install(), symbol_index(project_dir), path,
+        install(), symbol_index(_project_dir_of(path, project_dir)), path,
         nets=nets, max_length=max_length, dry_run=dry_run,
     )
 
@@ -827,7 +877,7 @@ def mark_pins_unused(
     place that text next to each marked pin -- useful when the symbol's pin
     name is generic or doesn't say what the net actually is.
     """
-    index = symbol_index(project_dir)
+    index = symbol_index(_project_dir_of(path, project_dir))
     editor = SchematicEditor.load(path)
     marked = editor.mark_pins_unused(
         index, reference, pin_numbers=pin_numbers, name_contains=name_contains, annotate=annotate,
@@ -845,7 +895,7 @@ def rewire_power_symbol(path: str, old_lib_id: str, new_lib_id: str, project_dir
     checked first, since otherwise the existing wire would no longer meet the
     new symbol's pin and the change would silently break the connection.
     """
-    index = symbol_index(project_dir)
+    index = symbol_index(_project_dir_of(path, project_dir))
     editor = SchematicEditor.load(path)
     changed = editor.swap_power_symbol(index, old_lib_id, new_lib_id)
     editor.save()
@@ -867,7 +917,7 @@ def add_decoupling_capacitors(
     capacitor is placed clear of existing content and wired rail-to-ground with
     its own wire -- not dependent on label matching.
     """
-    index = symbol_index(project_dir)
+    index = symbol_index(_project_dir_of(path, project_dir))
     return _add_decoupling_capacitors(index, path, rails, value=value, ground=ground)
 
 

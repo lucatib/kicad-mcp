@@ -177,3 +177,33 @@ def test_edit_notes_missing_fragment_is_an_error_not_an_exception(sch):
     res = server.edit_notes(str(sch), {"nowhere": "x"})
     assert res["error"] == "ToolInputError"
     assert "nowhere" in res["message"]
+
+
+def test_a_new_library_symbol_places_without_naming_the_project(tmp_path):
+    folder = tmp_path / "proj"
+    folder.mkdir()
+    (folder / "proj.kicad_pro").write_text("{}", encoding="utf-8")
+    sheet = folder / "proj.kicad_sch"
+    try:
+        generate_pinout_schematic(server.symbol_index(None), sheet, "Connector_Generic:Conn_01x03",
+                                  {"1": "SDA"}, mcu_reference="J1")
+    except Exception as exc:  # pragma: no cover
+        pytest.skip(f"KiCad not available: {exc}")
+
+    made = server.create_library_symbol(
+        str(sheet), "proj", "Shifter", [{"number": "1", "name": "LV1"}, {"number": "2", "name": "HV1"}],
+        footprint="PCM_Nope:Some_Footprint",
+    )
+    assert "error" not in made, made
+    assert made["lib_id"] == "proj:Shifter"
+    assert any("PCM_Nope:Some_Footprint" in w for w in made["warnings"])
+
+    placed = server.add_symbol_to_schematic(str(sheet), "proj:Shifter", {"LV1": "SDA"}, reference="U9")
+    assert "error" not in placed, placed
+    assert placed["connected"][0]["net"] == "SDA"
+
+
+def test_create_library_symbol_outside_a_project_is_an_error_not_an_exception(tmp_path):
+    res = server.create_library_symbol(str(tmp_path), "proj", "X", [{"number": "1"}])
+    assert res["error"] == "ToolInputError"
+    assert ".kicad_pro" in res["message"]
