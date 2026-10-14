@@ -136,24 +136,42 @@ def _read_table(path: Path, variables: dict[str, str], seen: set[Path]) -> list[
         return []
     seen.add(path)
 
-    try:
-        tree = sexpr.parse(path.read_text(encoding="utf-8"))
-    except (OSError, SyntaxError):
-        return []
-
     entries: list[LibraryEntry] = []
-    for lib in sexpr.children(tree, "lib"):
-        name = sexpr.value(lib, "name")
-        uri = sexpr.value(lib, "uri")
-        kind = str(sexpr.value(lib, "type", "KiCad"))
-        if not name or not uri:
-            continue
-        resolved = Path(_expand(str(uri), variables))
+    for name, uri, kind in _table_rows(path):
+        resolved = Path(_expand(uri, variables))
         if kind.lower() == "table":
             entries.extend(_read_table(resolved, variables, seen))
             continue
-        entries.append(LibraryEntry(name=str(name), uri=str(uri), path=resolved))
+        entries.append(LibraryEntry(name=name, uri=uri, path=resolved))
     return entries
+
+
+def _table_rows(path: Path) -> tuple[tuple[str, str, str], ...]:
+    """(name, uri, type) of each row of a table file, re-read only when it changes.
+
+    Tables are resolved on every lookup so edits show up at once, and a vendor
+    table can hold hundreds of rows; parsing them each time tripled the cost
+    of every pin lookup.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return ()
+    return _parse_table_rows(str(path), (stat.st_mtime_ns, stat.st_size))
+
+
+@lru_cache(maxsize=32)
+def _parse_table_rows(path_str: str, stamp: tuple[int, int]) -> tuple[tuple[str, str, str], ...]:
+    try:
+        tree = sexpr.parse(Path(path_str).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return ()
+    rows = []
+    for lib in sexpr.children(tree, "lib"):
+        name, uri = sexpr.value(lib, "name"), sexpr.value(lib, "uri")
+        if name and uri:
+            rows.append((str(name), str(uri), str(sexpr.value(lib, "type", "KiCad"))))
+    return tuple(rows)
 
 
 def resolve_tables(install, project_dir: Path | None, table: str) -> dict[str, LibraryEntry]:
@@ -407,8 +425,21 @@ def _parse_library(path_str: str) -> sexpr.SExpr:
     return _parse_library_cached(path_str, stamp)
 
 
-#: Top-level symbols sit at exactly one tab; nested unit variants are deeper.
-_TOP_LEVEL_SYMBOL = re.compile(r'[\r\n]\t\(symbol "([^"]+)"')
+#: A symbol opening a line, with its indentation. Top-level symbols are the
+#: least indented; nested unit variants sit deeper. KiCad 10 indents with
+#: tabs, KiCad 6 and 7 with two spaces, so the depth is read, not assumed.
+_SYMBOL_LINE = re.compile(r'^([ \t]*)\(symbol "([^"]+)"', re.MULTILINE)
+
+#: Part of each cached entry's stamp, so names cached by an older scan are redone.
+_SCAN_VERSION = 2
+
+
+def _top_level_names(text: str) -> list[str]:
+    found = _SYMBOL_LINE.findall(text)
+    if not found:
+        return []
+    top = min(len(indent) for indent, _ in found)
+    return [name for indent, name in found if len(indent) == top]
 
 
 def _cache_dir() -> Path:
@@ -452,7 +483,7 @@ def _symbol_names(path: Path | None) -> list[str]:
     second, and a disk cache keyed on size+mtime makes repeat calls instant.
 
     Sub-symbols (`Name_1_1`) are unit/body-style variants of their parent and are
-    excluded by the indentation anchor -- they are not separately placeable.
+    excluded by their deeper indentation -- they are not separately placeable.
     """
     global _NAME_CACHE
     if path is None or not path.is_file():
@@ -466,7 +497,7 @@ def _symbol_names(path: Path | None) -> list[str]:
     except OSError:
         return []
     key = str(path)
-    stamp = [int(stat.st_mtime), stat.st_size]
+    stamp = [int(stat.st_mtime), stat.st_size, _SCAN_VERSION]
     hit = _NAME_CACHE.get(key)
     if hit and hit.get("stamp") == stamp:
         return hit["names"]
@@ -475,7 +506,7 @@ def _symbol_names(path: Path | None) -> list[str]:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
-    names = _TOP_LEVEL_SYMBOL.findall(text)
+    names = _top_level_names(text)
     _NAME_CACHE[key] = {"stamp": stamp, "names": names}
     global _CACHE_DIRTY
     _CACHE_DIRTY = True
