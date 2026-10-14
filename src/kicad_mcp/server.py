@@ -676,6 +676,41 @@ def remove_symbols(
 
 @mcp.tool()
 @tool_result
+def disconnect_pins(
+    path: str,
+    reference: str,
+    pin_numbers: list[str] | None = None,
+    name_contains: str | None = None,
+    dry_run: bool = False,
+    project_dir: str | None = None,
+) -> dict:
+    """Take pins of an already-placed symbol off their nets; the symbol stays.
+
+    Choose pins as for mark_pins_unused: exact pin_numbers, a case-insensitive
+    name_contains, or both. Removed, listed under cleaned_up: the pin's
+    no-connect flag, the wire run from it back to the first point where
+    something else connects (another pin, a branch), and labels, power
+    symbols, PWR_FLAGs and junctions that then reach no pin. Use it to free
+    a pin for label_pins or mark_pins_unused, or to retire a net from a part
+    that stays. A pin whose wiring carries the net on to other pins (a label
+    on the pin with a wire beyond, two wires meeting on it, another part's
+    pin) keeps it and is listed under still_connected, as is one of several
+    stacked pins unless all are chosen. A pin number the part lacks changes
+    nothing. `dry_run` reports without writing.
+    """
+    editor = SchematicEditor.load(path)
+    result = editor.disconnect_pins(
+        symbol_index(project_dir), reference, pin_numbers=pin_numbers, name_contains=name_contains,
+    )
+    if not dry_run:
+        editor.save()
+    result["written"] = not dry_run
+    result["schematic"] = str(editor.path)
+    return result
+
+
+@mcp.tool()
+@tool_result
 def rename_labels(path: str, renames: dict[str, str], dry_run: bool = False) -> dict:
     """Rename nets on a .kicad_sch by renaming their labels, e.g. {"IN3": "IN1", "IN4": "IN2"}.
 

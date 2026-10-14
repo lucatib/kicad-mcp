@@ -110,7 +110,7 @@ the client configuration that is an `env` entry:
 **Editing existing schematics** — `add_symbol_to_schematic`, `label_pins`,
 `set_symbol_fields`, `mark_pins_unused`, `rewire_power_symbol`,
 `move_symbol_fields`, `add_decoupling_capacitors`, `remove_symbols`,
-`rename_labels`, `route_nets`
+`disconnect_pins`, `rename_labels`, `route_nets`
 
 **Escape hatch** — `run_kicad_script`
 
@@ -206,6 +206,25 @@ reported in `warnings` instead: wiring that joins two net names, since removing
 it would split those nets, and hierarchical labels, which the parent sheet's pin
 refers to. On a sheet used more than once the part goes from every use. An
 unknown reference removes nothing; `dry_run` reports without writing.
+
+### Freeing pins: `disconnect_pins`
+
+```json
+{"path": "C:/proj/main.kicad_sch", "reference": "U1", "pin_numbers": ["28", "29"]}
+```
+
+Takes pins off their nets while the part stays: the pin's no-connect flag, the
+wire run from it back to the first point where something else connects, and
+labels, power symbols, `PWR_FLAG`s and junctions that then reach no pin -- what
+`remove_symbols` would clear for those pins alone. Pins are chosen as for
+`mark_pins_unused`, by `pin_numbers` and/or `name_contains`. Use it to retire a
+net from a part that stays, or to free a no-connected pin for `label_pins`.
+
+A pin whose wiring carries the net on to other pins keeps it and is listed
+under `still_connected`: a label sitting on the pin with a wire beyond it, two
+wires meeting on it, or another part's pin on it. So is one of several pins
+stacked on one point, unless all of them are chosen. A pin number the part
+lacks changes nothing; `dry_run` reports without writing.
 
 ### Renaming nets: `rename_labels`
 

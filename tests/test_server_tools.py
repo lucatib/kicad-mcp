@@ -122,3 +122,25 @@ def test_move_symbol_fields_unknown_field_is_an_error_not_an_exception(sch):
     res = server.move_symbol_fields(str(sch), "U1", {"Nope": {"dx": 1}})
     assert res["error"] == "ToolInputError"
     assert "Reference" in res["message"], "names the fields it does have"
+
+
+def test_disconnect_pins_dry_run_reports_without_writing(sch):
+    before = sch.read_text(encoding="utf-8")
+    res = server.disconnect_pins(str(sch), "U1", pin_numbers=["8"], dry_run=True)
+    assert "error" not in res, res
+    assert res["cleaned_up"]["labels"] == ["LED"]
+    assert res["written"] is False
+    assert sch.read_text(encoding="utf-8") == before
+
+
+def test_disconnect_pins_tool_writes(sch):
+    res = server.disconnect_pins(str(sch), "U1", pin_numbers=["8"])
+    assert res["written"] is True
+    assert '(label "LED"' not in sch.read_text(encoding="utf-8")
+    assert server.list_schematic_symbols(str(sch), reference="U1")["count"] == 1
+
+
+def test_disconnect_pins_unknown_pin_is_an_error_not_an_exception(sch):
+    res = server.disconnect_pins(str(sch), "U1", pin_numbers=["999"])
+    assert res["error"] == "ToolInputError"
+    assert "999" in res["message"]

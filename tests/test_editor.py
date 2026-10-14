@@ -362,6 +362,152 @@ class TestRemoveSymbols:
         assert "U1" in editor.references()
 
 
+def _add_label(path, text, at):
+    """A local label dropped straight on `at`, as a user might in KiCad."""
+    editor = SchematicEditor.load(path)
+    builder = editor._builder()
+    builder.add_label(text, at)
+    editor._merge(builder)
+    editor.save()
+
+
+class TestDisconnectPins:
+    """U1 is the ESP32-S3-MINI-1: pin 8 IO4 carries the LED label, pin 9 IO5 is free,
+    pin 3 3V3 has the +3V3 rail and a PWR_FLAG, and its 24 GND pins share one point."""
+
+    def _disconnect(self, index, path, reference, **select):
+        editor = SchematicEditor.load(path)
+        res = editor.disconnect_pins(index, reference, **select)
+        editor.save()
+        return res
+
+    @pytest.mark.parametrize("kind", [None, "global_label"])
+    def test_takes_the_label_and_its_stub_off_the_pin(self, install, index, base_sch, kind):
+        if kind:
+            _relabel(base_sch, "LED", kind=kind)
+        before = _counts(base_sch)
+
+        res = self._disconnect(index, base_sch, "U1", pin_numbers=["8"])
+
+        assert res["disconnected"] == [{"pin": "8", "pin_name": "IO4"}]
+        assert res["cleaned_up"]["labels"] == ["LED"]
+        assert _counts(base_sch) == {**before, "wire": before["wire"] - 1, kind or "label": 0}
+        assert "U1" in SchematicEditor.load(base_sch).references(), "the part stays"
+        assert not any(("U1", "8") in nodes for net, nodes in _connectivity(install, base_sch).items()
+                       if not net.startswith("unconnected-"))
+
+    def test_frees_a_no_connected_pin_so_it_can_be_labelled(self, install, index, base_sch):
+        editor = SchematicEditor.load(base_sch)
+        editor.mark_pins_unused(index, "U1", pin_numbers=["9"])
+        editor.save()
+
+        res = self._disconnect(index, base_sch, "U1", pin_numbers=["9"])
+        assert res["cleaned_up"]["no_connects"] == 1
+        assert _counts(base_sch)["no_connect"] == 0
+
+        editor = SchematicEditor.load(base_sch)
+        labelled = editor.label_pins(index, "U1", {"IO5": "SDA"})
+        editor.save()
+        assert labelled["already_connected"] == []
+        assert ("U1", "9") in _connectivity(install, base_sch)["/SDA"]
+
+    def test_a_rail_serving_only_this_pin_goes_with_it(self, install, index, base_sch):
+        res = self._disconnect(index, base_sch, "U1", name_contains="3V3")
+
+        assert len(res["cleaned_up"]["power_symbols"]) == 2, "+3V3 and its PWR_FLAG"
+        assert "+3V3" not in _connectivity(install, base_sch)
+        assert "GND" in _connectivity(install, base_sch), "the other rail is untouched"
+        assert "Failed to load" not in _erc_text(install, base_sch)
+
+    def test_a_wire_to_another_part_is_cut_back_to_that_part(self, install, index, base_sch):
+        editor = SchematicEditor.load(base_sch)
+        editor.place_symbol(index, CONN, {}, reference="J1", at=(38.1, 38.1))
+        editor.save()
+        before = _counts(base_sch)
+        a, b = _pin(editor, index, "J1", "1"), _pin(editor, index, "U1", "9")
+        _draw_wires(base_sch, a, (a[0] - 7.62, a[1]), (a[0] - 7.62, b[1]), b)
+
+        res = self._disconnect(index, base_sch, "U1", pin_numbers=["9"])
+
+        assert res["cleaned_up"]["wires"] == 3, "every segment, around both corners"
+        assert _counts(base_sch) == before
+        assert "J1" in SchematicEditor.load(base_sch).references()
+
+    def test_a_wire_into_a_branch_is_cut_back_to_the_branch(self, install, index, base_sch):
+        editor = SchematicEditor.load(base_sch)
+        editor.place_symbol(index, CONN, {}, reference="J1", at=(38.1, 38.1))
+        editor.place_symbol(index, CONN, {}, reference="J2", at=(38.1, 152.4))
+        editor.save()
+        u1, j1, j2 = (_pin(editor, index, r, n) for r, n in (("U1", "9"), ("J1", "1"), ("J2", "1")))
+        tee = (u1[0] - 10.16, u1[1])
+        _draw_wires(base_sch, j1, (j1[0] - 7.62, j1[1]), (j1[0] - 7.62, u1[1]), tee, u1)
+        _draw_wires(base_sch, tee, (tee[0], j2[1]), j2)
+        editor = SchematicEditor.load(base_sch)
+        builder = editor._builder()
+        builder.add_junction(tee)
+        editor._merge(builder)
+        editor.save()
+
+        res = self._disconnect(index, base_sch, "U1", pin_numbers=["9"])
+
+        assert res["cleaned_up"]["wires"] == 1
+        assert res["cleaned_up"]["junctions"] == 1, "two wires meeting need no junction"
+        nets = _connectivity(install, base_sch)
+        assert any({("J1", "1"), ("J2", "1")} == nodes for nodes in nets.values()), "J1 and J2 stay joined"
+
+    def test_a_label_on_the_pin_that_carries_on_is_kept_and_reported(self, install, index, base_sch):
+        editor = SchematicEditor.load(base_sch)
+        editor.place_symbol(index, CONN, {}, reference="J1", at=(38.1, 38.1))
+        editor.place_symbol(index, CONN, {"1": "X"}, reference="J2")
+        editor.save()
+        a, b = _pin(editor, index, "J1", "1"), _pin(editor, index, "U1", "9")
+        _draw_wires(base_sch, a, (a[0] - 7.62, a[1]), (a[0] - 7.62, b[1]), b)
+        _add_label(base_sch, "X", b)
+        before = _counts(base_sch)
+
+        res = self._disconnect(index, base_sch, "U1", pin_numbers=["9"])
+
+        assert res["disconnected"] == []
+        assert [s["pin"] for s in res["still_connected"]] == ["9"]
+        assert any("9" in w and "X" in w for w in res["warnings"])
+        assert _counts(base_sch) == before, "J1 would lose the net X"
+        assert {("J1", "1"), ("J2", "1")} <= _connectivity(install, base_sch)["/X"]
+
+    def test_one_of_several_stacked_pins_cannot_leave_alone(self, index, base_sch):
+        before = _counts(base_sch)
+        res = self._disconnect(index, base_sch, "U1", pin_numbers=["1"])
+
+        assert [s["pin"] for s in res["still_connected"]] == ["1"]
+        assert any("42" in w for w in res["warnings"]), "names the pins it shares its point with"
+        assert _counts(base_sch) == before
+
+    def test_all_stacked_pins_leave_together(self, install, index, base_sch):
+        res = self._disconnect(index, base_sch, "U1", name_contains="GND")
+
+        assert len(res["disconnected"]) == 24
+        assert len(res["cleaned_up"]["power_symbols"]) == 2, "GND and its PWR_FLAG"
+        assert "GND" not in _connectivity(install, base_sch)
+
+    def test_a_free_pin_is_reported_and_nothing_changes(self, index, base_sch):
+        before = base_sch.read_text(encoding="utf-8")
+        res = self._disconnect(index, base_sch, "U1", pin_numbers=["9"])
+        assert res["already_free"] == [{"pin": "9", "pin_name": "IO5"}]
+        assert res["disconnected"] == []
+        assert base_sch.read_text(encoding="utf-8") == before
+
+    @pytest.mark.parametrize("select", [{"pin_numbers": ["999"]}, {"name_contains": "NOPE"}, {}])
+    def test_no_matching_pin_is_refused(self, index, base_sch, select):
+        editor = SchematicEditor.load(base_sch)
+        with pytest.raises(ToolInputError) as exc:
+            editor.disconnect_pins(index, "U1", **select)
+        assert exc.value.remedy
+
+    def test_unknown_reference_is_refused(self, index, base_sch):
+        editor = SchematicEditor.load(base_sch)
+        with pytest.raises(ToolInputError):
+            editor.disconnect_pins(index, "J99", pin_numbers=["1"])
+
+
 class TestRenameLabels:
     def _place(self, index, path, reference, assignments):
         editor = SchematicEditor.load(path)
