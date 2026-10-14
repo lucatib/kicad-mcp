@@ -24,7 +24,7 @@ from .generator import (
     GRID, LABEL_STUB, Join, PlacedSymbol, SchematicBuilder, _local_points, _normalise_key,
     _property, _snap, classify_net,
 )
-from .schematic import LABEL_KINDS, Schematic
+from .schematic import LABEL_KINDS, NOTE_KINDS, Schematic
 from .sexpr import Sym
 from .symbols import PinInfo, SymbolIndex, _natural_key, definition_pins
 
@@ -1071,6 +1071,74 @@ class SchematicEditor:
                 )
         return {"renamed": renamed, "warnings": warnings}
 
+    def edit_notes(self, replacements: dict[str, str]) -> dict:
+        """Rewrite text in the sheet's notes: free text and text boxes.
+
+        Each key is a fragment of one note, replaced by its value; the note
+        keeps its uuid, position and look. Every replacement applies to the
+        text as it was, so two can swap. A fragment must occur exactly once
+        across all notes, and two in one note must not overlap; otherwise
+        nothing changes. A note rewritten to nothing is removed. A text box
+        keeps its size, so one whose text grows is warned about. Labels are
+        not notes: they name nets, which rename_labels renames.
+        """
+        notes = [n for n in self.tree
+                 if sexpr._name_of(n) in NOTE_KINDS and len(n) > 1 and isinstance(n[1], str)]
+        edits: dict[int, list[tuple[int, int, str]]] = defaultdict(list)
+        problems = []
+        for old, new in replacements.items():
+            old, new = str(old), str(new)
+            hits = [(note, i) for note in notes for i in _occurrences(note[1], old)] if old else []
+            if not old:
+                problems.append("an empty fragment matches everywhere")
+            elif not hits:
+                problems.append(f"{old!r} is in no note")
+            elif len(hits) > 1:
+                where = sorted({_note_name(n) for n, _ in hits})
+                problems.append(f"{old!r} occurs {len(hits)} times, in {', '.join(where)}")
+            else:
+                note, start = hits[0]
+                edits[id(note)].append((start, start + len(old), new))
+        for note in notes:
+            spans = sorted(edits.get(id(note), []))
+            for (_, end, _), (start, _, _) in zip(spans, spans[1:]):
+                if start < end:
+                    problems.append(f"two fragments overlap in {_note_name(note)}")
+                    break
+        if problems or not replacements:
+            raise ToolInputError(
+                f"Cannot edit the notes of {self.path.name}: {'; '.join(problems) or 'no replacements given'}. "
+                "Nothing was changed.",
+                remedy="open_schematic lists every note; quote enough of one to occur once "
+                       "(line breaks are \\n). To rename a net, use rename_labels.",
+            )
+
+        edited, removed, warnings, gone = [], [], [], set()
+        for note in notes:
+            spans = edits.get(id(note))
+            if not spans:
+                continue
+            text = note[1]
+            for start, end, new in sorted(spans, reverse=True):
+                text = text[:start] + new + text[end:]
+            at = sexpr.values(note, "at")
+            where = {"position": {"x": float(at[0]), "y": float(at[1])}} if len(at) >= 2 else {}
+            if not text.strip():
+                gone.add(id(note))
+                removed.append({"kind": note[0].name, **where, "text": note[1]})
+                continue
+            if note[0].name == "text_box" and len(text) > len(note[1]):
+                size = sexpr.values(note, "size")
+                warnings.append(
+                    f"The text box at ({float(at[0]):g}, {float(at[1]):g}) keeps its size"
+                    + (f" ({float(size[0]):g} x {float(size[1]):g} mm)" if len(size) >= 2 else "")
+                    + "; check its longer text still fits."
+                )
+            note[1] = text
+            edited.append({"kind": note[0].name, **where, "replacements": len(spans), "text": text})
+        self.tree[:] = [n for n in self.tree if id(n) not in gone]
+        return {"edited": edited, "removed": removed, "warnings": warnings}
+
     def add_two_pin_component(
         self,
         index: SymbolIndex,
@@ -1554,6 +1622,21 @@ class _Layout:
         through = sum(_on_segment(key, *self.ends[id(w)]) for w in live)
         pins = len(self.pins.get(key, [])) + self.released.get(key, 0) + (key in self.fixed)
         return ends + 2 * through + pins
+
+
+def _occurrences(text: str, fragment: str) -> list[int]:
+    """Every index `fragment` starts at in `text`, overlapping ones included."""
+    out, i = [], text.find(fragment)
+    while i >= 0:
+        out.append(i)
+        i = text.find(fragment, i + 1)
+    return out
+
+
+def _note_name(note: sexpr.SExpr) -> str:
+    """A note as a message names it: its first line, shortened."""
+    first = note[1].split("\n", 1)[0]
+    return repr(first if len(first) <= 40 else first[:37] + "...")
 
 
 def _pins(numbers) -> str:

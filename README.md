@@ -110,7 +110,7 @@ the client configuration that is an `env` entry:
 **Editing existing schematics** — `add_symbol_to_schematic`, `label_pins`,
 `set_symbol_fields`, `mark_pins_unused`, `rewire_power_symbol`,
 `move_symbol_fields`, `add_decoupling_capacitors`, `remove_symbols`,
-`disconnect_pins`, `rename_labels`, `route_nets`
+`disconnect_pins`, `rename_labels`, `edit_notes`, `route_nets`
 
 **Escape hatch** — `run_kicad_script`
 
@@ -249,6 +249,21 @@ label on the sheet keeps, onto a power net, or two names onto one. Only this
 sheet changes, so `warnings` says when a global label's old name stays on other
 sheets or its new one is already there, and when a hierarchical label leaves the
 parent's sheet pin on the old name.
+
+### Rewriting notes: `edit_notes`
+
+```json
+{"path": "C:/proj/main.kicad_sch", "replacements": {"spare GPIO8, 9": "spare GPIO35-42"}}
+```
+
+Each key is a fragment of one note on the sheet, free text or a text box, and is
+replaced by its value; the note keeps its uuid, position and look.
+`open_schematic` lists every note, with line breaks as `\n`. Quote a whole note
+to replace all of it, or rewrite it to `""` to remove it. All replacements apply
+to the text as it was, so two can swap. A fragment found in no note or more than
+once is refused and nothing is written; quote more of the text to make it
+unique. A text box keeps its size, so `warnings` flags one whose text grew.
+Labels are not notes: they name nets, which `rename_labels` renames.
 
 ### Drawing wires: `route_nets`
 

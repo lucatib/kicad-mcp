@@ -17,6 +17,8 @@ from .errors import ToolInputError
 from .sexpr import Sym
 
 LABEL_KINDS = ("label", "global_label", "hierarchical_label")
+#: Text drawn on the sheet that names no net: free text and text boxes.
+NOTE_KINDS = ("text", "text_box")
 
 
 @dataclass
@@ -180,6 +182,19 @@ class Schematic:
             out.append({"points": coords})
         return out
 
+    def notes(self) -> list[dict]:
+        """The sheet's notes, in file order, with line breaks as newlines."""
+        out = []
+        for node in self.tree:
+            if sexpr._name_of(node) in NOTE_KINDS and len(node) > 1 and isinstance(node[1], str):
+                at = sexpr.values(node, "at")
+                out.append({
+                    "kind": node[0].name,
+                    "text": node[1],
+                    "position": {"x": float(at[0]), "y": float(at[1])} if len(at) >= 2 else {},
+                })
+        return out
+
     def junctions(self) -> list[dict]:
         out = []
         for node in sexpr.children(self.tree, "junction"):
@@ -221,6 +236,7 @@ class Schematic:
     def summary(self) -> dict:
         syms = self.symbols()
         powers = [s for s in syms if s.lib_id.startswith("power:")]
+        notes = self.notes()
         return {
             "path": str(self.path),
             "version": self.version,
@@ -235,9 +251,11 @@ class Schematic:
                 "wires": len(self.wires()),
                 "junctions": len(self.junctions()),
                 "sheets": len(self.sheets()),
+                "notes": len(notes),
                 "embedded_lib_symbols": len(self.lib_symbol_ids()),
             },
             "sheets": self.sheets(),
+            "notes": notes,
         }
 
 

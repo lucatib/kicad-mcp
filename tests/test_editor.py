@@ -583,6 +583,115 @@ class TestRenameLabels:
         assert any("TO_PARENT" in w and "sheet pin" in w for w in res["warnings"])
 
 
+TEXT_BOX = """(text_box "X6: 1x4 header to the relay board"
+	(exclude_from_sim no)
+	(at 50.8 160.02 0)
+	(size 40.64 7.62)
+	(margins 0.9525 0.9525 0.9525 0.9525)
+	(stroke (width 0) (type solid))
+	(fill (type none))
+	(effects (font (size 1.27 1.27)) (justify left top))
+	(uuid "00000000-0000-0000-0000-0000000b0c00")
+)"""
+
+
+def _add_notes(path, *texts, box=False):
+    """Free-text notes at made-up spots, plus TEXT_BOX if `box`, as a user writes them."""
+    from kicad_mcp import sexpr
+
+    editor = SchematicEditor.load(path)
+    builder = editor._builder()
+    for i, text in enumerate(texts):
+        builder.add_text(text, (25.4, 160.02 + 15.24 * i))
+    editor._merge(builder)
+    if box:
+        editor.tree.insert(-1, sexpr.parse(TEXT_BOX))
+    editor.save()
+
+
+def _notes(path, kind=None):
+    from kicad_mcp import sexpr
+
+    tree = sexpr.parse(path.read_text(encoding="utf-8"))
+    kinds = (kind,) if kind else ("text", "text_box")
+    return [n for n in tree if isinstance(n, list) and n and getattr(n[0], "name", "") in kinds]
+
+
+class TestEditNotes:
+    NOTE = "A2.1  ESP32-S3-DevKitC-1\nNot used: RST; spare GPIO8, 9. Every analog input is on ADC1."
+
+    def _edit(self, path, replacements):
+        editor = SchematicEditor.load(path)
+        res = editor.edit_notes(replacements)
+        editor.save()
+        return res
+
+    def test_rewrites_a_fragment_and_keeps_the_rest_of_the_note(self, install, base_sch):
+        from kicad_mcp import sexpr
+
+        _add_notes(base_sch, self.NOTE, "Sheets: relay.kicad_sch")
+        before = _notes(base_sch)
+
+        res = self._edit(base_sch, {"spare GPIO8, 9.": "spare GPIO35-42. GPIO8/9 are I2C SDA/SCL."})
+
+        after = _notes(base_sch)
+        expected = self.NOTE.replace("spare GPIO8, 9.", "spare GPIO35-42. GPIO8/9 are I2C SDA/SCL.")
+        assert after[0][1] == expected
+        assert [n[2:] for n in after] == [n[2:] for n in before], "position, look and uuid stay"
+        assert after[1] == before[1], "the other note is untouched"
+        assert res["edited"] == [{"kind": "text", "position": {"x": 25.4, "y": 160.02},
+                                  "replacements": 1, "text": expected}]
+        assert "Failed to load" not in _erc_text(install, base_sch)
+        assert "\\n" in base_sch.read_text(encoding="utf-8"), "line breaks stay escaped in the file"
+        assert sexpr.parse(base_sch.read_text(encoding="utf-8"))
+
+    def test_replacements_apply_to_the_text_as_it_was(self, base_sch):
+        _add_notes(base_sch, "X6 left, X7 right")
+        self._edit(base_sch, {"X6": "X7", "X7": "X6"})
+        assert _notes(base_sch)[0][1] == "X7 left, X6 right"
+
+    def test_a_text_box_is_a_note_too_and_warns_when_it_grows(self, install, base_sch):
+        _add_notes(base_sch, box=True)
+        res = self._edit(base_sch, {"1x4 header": "1x4 header (+5V_RLY, GND_E2, SDA_5V, SCL_5V)"})
+
+        box, = _notes(base_sch, "text_box")
+        assert box[1] == "X6: 1x4 header (+5V_RLY, GND_E2, SDA_5V, SCL_5V) to the relay board"
+        assert res["edited"][0]["kind"] == "text_box"
+        assert any("text box" in w and "50.8" in w for w in res["warnings"])
+        assert "Failed to load" not in _erc_text(install, base_sch)
+
+    def test_a_note_rewritten_to_nothing_is_removed(self, base_sch):
+        _add_notes(base_sch, "obsolete", "keep me")
+        res = self._edit(base_sch, {"obsolete": ""})
+        assert [n[1] for n in _notes(base_sch)] == ["keep me"]
+        assert res["removed"] == [{"kind": "text", "position": {"x": 25.4, "y": 160.02}, "text": "obsolete"}]
+
+    @pytest.mark.parametrize("replacements,needle", [
+        ({"spare GPIO7": "x"}, "spare GPIO7"),  # in no note
+        ({"Sheets": "x"}, "2 times"),  # in two notes
+        ({"used": "x", "1": "y"}, "'1' occurs 3 times"),  # three times in one note
+        ({"spare GPIO8": "x", "GPIO8, 9": "y"}, "overlap"),
+        ({"": "x"}, "empty"),
+        ({"LED": "STATUS"}, "LED"),  # a label is not a note
+    ])
+    def test_a_bad_fragment_is_refused_and_nothing_changes(self, base_sch, replacements, needle):
+        _add_notes(base_sch, self.NOTE, "Sheets: relay.kicad_sch", "Sheets again")
+        before = base_sch.read_text(encoding="utf-8")
+        editor = SchematicEditor.load(base_sch)
+        with pytest.raises(ToolInputError) as exc:
+            editor.edit_notes(replacements)
+        assert needle in exc.value.message
+        assert exc.value.remedy
+        assert base_sch.read_text(encoding="utf-8") == before
+
+    def test_the_sheet_summary_lists_its_notes(self, base_sch):
+        _add_notes(base_sch, self.NOTE, box=True)
+        notes = Schematic.load(base_sch).summary()["notes"]
+        assert [(n["kind"], n["text"]) for n in notes] == [
+            ("text", self.NOTE), ("text_box", "X6: 1x4 header to the relay board"),
+        ]
+
+
 def _symbol_nodes(path, reference):
     from kicad_mcp import sexpr
 

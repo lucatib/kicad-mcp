@@ -144,3 +144,36 @@ def test_disconnect_pins_unknown_pin_is_an_error_not_an_exception(sch):
     res = server.disconnect_pins(str(sch), "U1", pin_numbers=["999"])
     assert res["error"] == "ToolInputError"
     assert "999" in res["message"]
+
+
+def _with_note(sch, text):
+    from kicad_mcp.editor import SchematicEditor
+
+    editor = SchematicEditor.load(sch)
+    builder = editor._builder()
+    builder.add_text(text, (25.4, 160.02))
+    editor._merge(builder)
+    editor.save()
+
+
+def test_edit_notes_dry_run_reports_without_writing(sch):
+    _with_note(sch, "spare GPIO8, 9")
+    before = sch.read_text(encoding="utf-8")
+    res = server.edit_notes(str(sch), {"GPIO8, 9": "GPIO35-42"}, dry_run=True)
+    assert "error" not in res, res
+    assert res["edited"][0]["text"] == "spare GPIO35-42"
+    assert res["written"] is False
+    assert sch.read_text(encoding="utf-8") == before
+
+
+def test_edit_notes_tool_writes_and_open_schematic_shows_it(sch):
+    _with_note(sch, "spare GPIO8, 9")
+    res = server.edit_notes(str(sch), {"GPIO8, 9": "GPIO35-42"})
+    assert res["written"] is True
+    assert server.open_schematic(str(sch))["notes"][0]["text"] == "spare GPIO35-42"
+
+
+def test_edit_notes_missing_fragment_is_an_error_not_an_exception(sch):
+    res = server.edit_notes(str(sch), {"nowhere": "x"})
+    assert res["error"] == "ToolInputError"
+    assert "nowhere" in res["message"]

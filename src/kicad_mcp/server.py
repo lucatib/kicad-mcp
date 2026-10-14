@@ -369,7 +369,7 @@ def list_zones(limit: int = 100) -> dict:
 @mcp.tool()
 @tool_result
 def open_schematic(path: str) -> dict:
-    """Open a .kicad_sch file and summarise it: title block, counts, and child sheets. Works with KiCad closed - schematic access is file-based because KiCad 10 has no schematic IPC API."""
+    """Open a .kicad_sch file and summarise it: title block, counts, child sheets, and the text of its notes. Works with KiCad closed - schematic access is file-based because KiCad 10 has no schematic IPC API."""
     return Schematic.load(path).summary()
 
 
@@ -726,6 +726,29 @@ def rename_labels(path: str, renames: dict[str, str], dry_run: bool = False) -> 
     """
     editor = SchematicEditor.load(path)
     result = editor.rename_labels(renames)
+    if not dry_run:
+        editor.save()
+    result["written"] = not dry_run
+    result["schematic"] = str(editor.path)
+    return result
+
+
+@mcp.tool()
+@tool_result
+def edit_notes(path: str, replacements: dict[str, str], dry_run: bool = False) -> dict:
+    """Rewrite text in a sheet's notes -- free text and text boxes -- e.g. {"spare GPIO8, 9": "spare GPIO35-42"}.
+
+    Each key is a fragment of one note (open_schematic lists them; line
+    breaks are \\n), replaced by its value; the note keeps its uuid,
+    position and look. Quote a whole note to replace all of it, or rewrite
+    it to "" to remove it. All replacements apply to the text as it was, so
+    two can swap. Refused, writing nothing: a fragment found in no note or
+    more than once, and two overlapping in one note. A text box keeps its
+    size, so warnings flag one whose text grew. Labels are not notes; nets
+    are renamed with rename_labels. `dry_run` reports without writing.
+    """
+    editor = SchematicEditor.load(path)
+    result = editor.edit_notes(replacements)
     if not dry_run:
         editor.save()
     result["written"] = not dry_run
