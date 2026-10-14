@@ -16,6 +16,7 @@ wrote stays byte for byte.
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 
 from . import hierarchy, sexpr
@@ -257,8 +258,15 @@ def _with_symbol(text: str | None, node: sexpr.SExpr) -> str:
             Sym("kicad_symbol_lib"), make("version", LIBRARY_VERSION),
             make("generator", GENERATOR), make("generator_version", "10.0"), node,
         ])
+    # In the file's own indentation: search tells top-level symbols from unit
+    # ones by depth, so a tab among KiCad 7's two spaces would hide the rest.
     newline = "\r\n" if "\r\n" in text else "\n"
-    return _before_close(text, "".join(f"\t{line}{newline}" for line in sexpr.dumps(node).splitlines()))
+    step = m.group(1) if (m := re.search(r"\n([ \t]+)\(", text)) else "\t"
+    lines = []
+    for line in sexpr.dumps(node).splitlines():
+        depth = len(line) - len(line.lstrip("\t"))
+        lines.append(step * (depth + 1) + line[depth:] + newline)
+    return _before_close(text, "".join(lines))
 
 
 def _with_entry(text: str | None, fields: list[sexpr.SExpr]) -> str:

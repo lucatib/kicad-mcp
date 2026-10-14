@@ -204,6 +204,37 @@ class TestCreateSymbol:
         assert (project / "sym-lib-table").read_text(encoding="utf-8") == table
         assert _pins(install, project, f"mine:{NAME}")
 
+    def test_a_kicad_7_library_keeps_its_symbols_findable(self, install, project):
+        # KiCad 6 and 7 indent with two spaces; search tells top-level symbols
+        # by indentation, so a tab-indented addition would hide the old ones.
+        original = (
+            '(kicad_symbol_lib (version 20211014) (generator kicad_symbol_editor)\n'
+            '  (symbol "Old_Part" (in_bom yes) (on_board yes)\n'
+            '    (property "Reference" "U" (id 0) (at 0 0 0)\n'
+            '      (effects (font (size 1.27 1.27)))\n'
+            '    )\n'
+            '    (symbol "Old_Part_1_1"\n'
+            '      (pin passive line (at -5.08 0 0) (length 2.54)\n'
+            '        (name "A" (effects (font (size 1.27 1.27))))\n'
+            '        (number "1" (effects (font (size 1.27 1.27))))\n'
+            '      )\n'
+            '    )\n'
+            '  )\n'
+            ')\n'
+        )
+        (project / "proj.kicad_sym").write_text(original, encoding="utf-8")
+        (project / "sym-lib-table").write_text(
+            '(sym_lib_table\n  (lib (name "proj")(type "KiCad")(uri "${KIPRJMOD}/proj.kicad_sym")'
+            '(options "")(descr ""))\n)\n', encoding="utf-8")
+
+        _create(install, project)
+
+        text = (project / "proj.kicad_sym").read_text(encoding="utf-8")
+        assert "\t" not in text, "the addition is indented as the file is"
+        assert f'\n  (symbol "{NAME}"' in text
+        found = {h["symbol"] for h in SymbolIndex(install, project).search("", library="proj")}
+        assert found == {"Old_Part", NAME}
+
     def test_an_existing_table_gets_the_new_library_in_its_own_style(self, install, project):
         table = (
             '(sym_lib_table\n  (version 7)\n'
