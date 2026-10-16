@@ -324,6 +324,21 @@ labels, and `dry_run` to verify without writing.
 The output is a normal `.kicad_sch` you can open and keep editing. It is written
 directly, so KiCad does not need to be running.
 
+### Design rules: `run_drc`
+
+`run_drc` runs `kicad-cli pcb drc` and parses the JSON report rather than
+returning a slice of it. A dense board's report is megabytes long, and its first
+screenful is usually one kind of violation. So the result counts every violation
+by type and by severity, and gives the unconnected and schematic-parity counts.
+The list it returns is capped at `limit` and can be narrowed:
+
+```json
+{"path": "C:/proj/board.kicad_pcb", "violation_type": "invalid_outline"}
+```
+
+`violation_type` takes globs (`silk_*`) and `severity` is `error` or `warning`.
+The complete report stays on disk at `report_file`.
+
 ## Two things to know about KiCad 10
 
 **The API only serves editors that are open.** KiCad registers API handlers per

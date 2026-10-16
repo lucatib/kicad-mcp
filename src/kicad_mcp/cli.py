@@ -8,6 +8,7 @@ and footprints, which is enough to reason about a design without a GUI.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
 import subprocess
@@ -240,15 +241,56 @@ def export_plot(install, schematic: str | Path, fmt: str = "pdf",
     return result
 
 
+def summarize_drc_report(report: dict, violation_type: str | None = None,
+                         severity: str | None = None, limit: int = 100) -> dict:
+    """Counts over every violation, plus a filtered, capped list of them.
+
+    A dense board's report runs to megabytes; a character slice of it keeps
+    only whichever violation kind KiCad happened to list first and breaks the
+    JSON. Counts by type and severity span the whole report, so a rare but
+    serious kind (invalid_outline among a thousand clearances) still shows,
+    and the filters fetch exactly those.
+    """
+    violations = report.get("violations", [])
+    by_type: dict[str, int] = {}
+    by_severity: dict[str, int] = {}
+    for v in violations:
+        by_type[v.get("type", "")] = by_type.get(v.get("type", ""), 0) + 1
+        by_severity[v.get("severity", "")] = by_severity.get(v.get("severity", ""), 0) + 1
+
+    matching = [
+        v for v in violations
+        if (not violation_type or fnmatch.fnmatch(v.get("type", ""), violation_type))
+        and (not severity or v.get("severity", "") == severity)
+    ]
+    out = {
+        "kicad_version": report.get("kicad_version"),
+        "coordinate_units": report.get("coordinate_units", "mm"),
+        "violation_count": len(violations),
+        "counts_by_type": dict(sorted(by_type.items(), key=lambda kv: -kv[1])),
+        "counts_by_severity": by_severity,
+        "unconnected_count": len(report.get("unconnected_items", [])),
+        "schematic_parity_count": len(report.get("schematic_parity", [])),
+        "matching": len(matching),
+        "violations": matching[:limit],
+    }
+    if len(matching) > limit:
+        out["truncated"] = True
+        out["hint"] = (f"{len(matching) - limit} more; filter by violation_type "
+                       "or severity, or raise limit.")
+    return out
+
+
 def pcb_drc(install, board: str | Path, output: str | Path | None = None,
-            fmt: str = "json") -> dict:
+            violation_type: str | None = None, severity: str | None = None,
+            limit: int = 100) -> dict:
     src = _require_file(board, ".kicad_pcb")
-    out = Path(output) if output else src.with_suffix(f".drc.{fmt}")
-    result = run_cli(install, ["pcb", "drc", "--format", fmt, "-o", str(out), str(src)])
+    out = Path(output) if output else src.with_suffix(".drc.json")
+    result = run_cli(install, ["pcb", "drc", "--format", "json", "-o", str(out), str(src)])
     result["report_file"] = str(out) if out.is_file() else None
-    if out.is_file():
-        try:
-            result["report"] = out.read_text(encoding="utf-8", errors="replace")[:20000]
-        except OSError:  # pragma: no cover
-            pass
+    try:
+        report = json.loads(out.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return result  # kicad-cli's stderr says why there is no report
+    result.update(summarize_drc_report(report, violation_type, severity, limit))
     return result

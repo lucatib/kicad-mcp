@@ -436,9 +436,18 @@ def run_erc(path: str, severity_all: bool = False) -> dict:
 
 @mcp.tool()
 @tool_result
-def run_drc(path: str) -> dict:
-    """Run Design Rules Check on a .kicad_pcb file via kicad-cli and return the report."""
-    return kcli.pcb_drc(install(), path)
+def run_drc(path: str, violation_type: str | None = None, severity: str | None = None,
+            limit: int = 100) -> dict:
+    """Run Design Rules Check on a .kicad_pcb file via kicad-cli.
+
+    Returns counts over the whole report -- by type (e.g. invalid_outline,
+    clearance) and by severity -- plus unconnected and schematic-parity counts,
+    and a list of violations capped at `limit`. Narrow the list with
+    `violation_type` (glob, e.g. 'invalid_outline' or 'silk_*') and `severity`
+    ('error' or 'warning'). The full JSON stays in `report_file`.
+    """
+    return kcli.pcb_drc(install(), path, violation_type=violation_type,
+                        severity=severity, limit=limit)
 
 
 @mcp.tool()
