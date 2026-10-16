@@ -264,10 +264,10 @@ def list_board_shapes(layer: str | None = None, shape_type: str | None = None,
     its footprint's reference.
     """
     if path:
-        rows = pcb_file.shapes(path, include_footprints)
+        rows = pcb_file.shapes(path, include_footprints, layer)
     else:
-        rows = pcb_live.shapes(SESSION.board(), include_footprints)
-    return _cap(pcb_common.filter_shapes(rows, layer, shape_type), limit)
+        rows = pcb_live.shapes(SESSION.board(), include_footprints, layer)
+    return _cap(pcb_common.filter_shape_type(rows, shape_type), limit)
 
 
 @mcp.tool()

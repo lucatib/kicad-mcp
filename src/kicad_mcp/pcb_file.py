@@ -258,17 +258,35 @@ def shape_row(pcbnew, shape, footprint: str | None = None) -> dict:
     return row
 
 
-def shapes(path: str, include_footprints: bool = False) -> list[dict]:
+def shapes(path: str, include_footprints: bool = False,
+           layer: str | None = None) -> list[dict]:
+    """Shapes on layers matching `layer` by the board's name for the layer
+    or KiCad's standard one (a renamed User.1 answers to both).
+
+    The layer is checked before a row is built: a dense board has tens of
+    thousands of footprint graphics, and converting them all to find a
+    handful on Edge.Cuts takes seconds.
+    """
     pcbnew = _pcbnew()
+    names: dict[int, bool] = {}
+
+    def wanted(item) -> bool:
+        if not isinstance(item, pcbnew.PCB_SHAPE):
+            return False
+        lid = item.GetLayer()
+        if lid not in names:
+            names[lid] = (pcb_common.layer_matches(item.GetLayerName(), layer)
+                          or pcb_common.layer_matches(pcbnew.BOARD.GetStandardLayerName(lid), layer))
+        return names[lid]
+
     with _LOCK:
         board = load(path)
-        rows = [shape_row(pcbnew, d) for d in board.GetDrawings()
-                if isinstance(d, pcbnew.PCB_SHAPE)]
+        rows = [shape_row(pcbnew, d) for d in board.GetDrawings() if wanted(d)]
         if include_footprints:
             for fp in board.GetFootprints():
                 ref = str(fp.GetReference())
                 rows.extend(shape_row(pcbnew, g, ref) for g in fp.GraphicalItems()
-                            if isinstance(g, pcbnew.PCB_SHAPE))
+                            if wanted(g))
         return rows
 
 
@@ -300,8 +318,7 @@ def outline(path: str) -> dict:
         board = load(path)
         polys = pcbnew.SHAPE_POLY_SET()
         valid = bool(board.GetBoardPolygonOutlines(polys, False))
-        edge = [r for r in shapes(path, include_footprints=True)
-                if r["layer"] == "Edge.Cuts"]
+        edge = shapes(path, include_footprints=True, layer="Edge.Cuts")
         epsilon = _mm(board.GetOutlinesChainingEpsilon())
 
         outlines = []

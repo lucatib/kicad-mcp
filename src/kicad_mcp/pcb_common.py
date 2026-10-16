@@ -76,9 +76,7 @@ def dangling_ends(rows: list[dict], epsilon_mm: float) -> list[dict]:
     return [ends[k][1] for k in range(len(ends)) if not has_partner(k)]
 
 
-def filter_shapes(rows: list[dict], layer: str | None, shape_type: str | None) -> list[dict]:
-    return [
-        r for r in rows
-        if layer_matches(r["layer"], layer)
-        and (not shape_type or fnmatch.fnmatch(r["type"].lower(), shape_type.lower()))
-    ]
+def filter_shape_type(rows: list[dict], shape_type: str | None) -> list[dict]:
+    if not shape_type:
+        return rows
+    return [r for r in rows if fnmatch.fnmatch(r["type"].lower(), shape_type.lower())]

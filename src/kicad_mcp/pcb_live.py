@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import units
+from . import pcb_common, units
 
 
 def _ref(fp) -> str:
@@ -245,12 +245,25 @@ def shape_row(board, shape, footprint: str | None = None) -> dict:
     return row
 
 
-def shapes(board, include_footprints: bool = False) -> list[dict]:
-    rows = [shape_row(board, s) for s in board.get_shapes()]
+def shapes(board, include_footprints: bool = False, layer: str | None = None) -> list[dict]:
+    """Shapes on layers matching `layer` by the board's name or the standard one."""
+    from kipy.util.board_layer import canonical_name  # noqa: PLC0415 - optional dep
+
+    names: dict[int, bool] = {}
+
+    def wanted(shape) -> bool:
+        if shape.layer not in names:
+            names[shape.layer] = (
+                pcb_common.layer_matches(board.get_layer_name(shape.layer), layer)
+                or pcb_common.layer_matches(canonical_name(shape.layer), layer)
+            )
+        return names[shape.layer]
+
+    rows = [shape_row(board, s) for s in board.get_shapes() if wanted(s)]
     if include_footprints:
         for fp in board.get_footprints():
             ref = _ref(fp)
-            rows.extend(shape_row(board, s, ref) for s in fp.definition.shapes)
+            rows.extend(shape_row(board, s, ref) for s in fp.definition.shapes if wanted(s))
     return rows
 
 

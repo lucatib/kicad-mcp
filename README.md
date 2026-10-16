@@ -355,7 +355,9 @@ and its cutouts are on `Edge.Cuts`:
 ```
 
 `layer` takes globs, and both name forms work: `F.SilkS` and `F.Silkscreen`,
-`Dwgs.User` and `User.Drawings`. `shape_type` narrows to one kind. Only
+`Dwgs.User` and `User.Drawings`. A layer the board renamed answers to both its
+own name and the standard one, so `User.1` finds shapes on a layer called
+`Mechanical 1`. `shape_type` narrows to one kind. Only
 board-level drawings are listed unless `include_footprints` is set. Then
 footprint graphics are listed too, each tagged with its footprint's reference,
 which matters because slots and cutouts often live inside a footprint. A

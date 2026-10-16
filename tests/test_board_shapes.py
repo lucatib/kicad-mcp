@@ -60,6 +60,21 @@ def test_footprint_graphics_only_on_request(pcb_file):
     assert rect["bottom_right"] == {"x": 15.5, "y": 13.0}
 
 
+@pytest.mark.requires_kicad
+def test_a_renamed_layer_matches_by_either_name(pcb_file):
+    from pcb_fixture import pcbnew
+
+    board = pcbnew.LoadBoard(str(pcb_file))
+    board.SetLayerName(pcbnew.User_1, "Mechanical 1")
+    pcbnew.SaveBoard(str(pcb_file), board)
+
+    by_canonical = server.list_board_shapes(layer="User.1", path=str(pcb_file))
+    by_custom = server.list_board_shapes(layer="Mechanical*", path=str(pcb_file))
+
+    assert by_canonical["count"] == by_custom["count"] == 1
+    assert by_custom["items"][0]["layer"] == "Mechanical 1"
+
+
 def test_legacy_layer_names_match_canonical_ones():
     assert pcb_common.layer_matches("F.Silkscreen", "F.SilkS")
     assert pcb_common.layer_matches("F.Courtyard", "f.crtyd")
