@@ -271,6 +271,20 @@ def list_board_shapes(layer: str | None = None, shape_type: str | None = None,
 
 @mcp.tool()
 @tool_result
+def validate_board_outline(path: str) -> dict:
+    """Check that a board's Edge.Cuts forms closed outlines, the way KiCad's 3D viewer, exports and DRC build them.
+
+    Reports validity, each outline's bounding box and area (mm, mm^2) with its
+    cutouts -- including slots drawn on Edge.Cuts inside footprints -- and any
+    Edge.Cuts ends that meet nothing. An invalid outline makes KiCad fall back
+    to the bounding box and drop every cutout. Reads the saved .kicad_pcb, so
+    save the board first.
+    """
+    return pcb_file.outline(path)
+
+
+@mcp.tool()
+@tool_result
 def get_selection() -> dict:
     """What the user currently has selected in the KiCad GUI. Use this to act on 'the thing I'm looking at'."""
     board = SESSION.board()

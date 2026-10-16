@@ -38,6 +38,44 @@ def layer_matches(name: str, pattern: str | None) -> bool:
     return any(fnmatch.fnmatch(name, c) for c in candidates)
 
 
+#: Shapes with two free ends; circles, rectangles and polygons close themselves.
+OPEN_SHAPES = ("Segment", "Arc", "Bezier")
+
+
+def dangling_ends(rows: list[dict], epsilon_mm: float) -> list[dict]:
+    """End points that meet no other shape's end within `epsilon_mm`.
+
+    An outline is a chain of open shapes joined end to end, so in a closed
+    outline every end has a partner. The ones without are where it is open.
+    Points are bucketed on an epsilon grid so a dense outline stays linear.
+    """
+    ends = []
+    for i, r in enumerate(rows):
+        if r["type"] in OPEN_SHAPES:
+            ends.append((i, r["start"]))
+            ends.append((i, r["end"]))
+
+    cell = max(epsilon_mm, 1e-9)
+    grid: dict[tuple[int, int], list[int]] = {}
+    for k, (_, p) in enumerate(ends):
+        grid.setdefault((int(p["x"] // cell), int(p["y"] // cell)), []).append(k)
+
+    def has_partner(k: int) -> bool:
+        owner, p = ends[k]
+        cx, cy = int(p["x"] // cell), int(p["y"] // cell)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for j in grid.get((cx + dx, cy + dy), ()):
+                    if j == k or ends[j][0] == owner:
+                        continue
+                    q = ends[j][1]
+                    if (p["x"] - q["x"]) ** 2 + (p["y"] - q["y"]) ** 2 <= epsilon_mm ** 2:
+                        return True
+        return False
+
+    return [ends[k][1] for k in range(len(ends)) if not has_partner(k)]
+
+
 def filter_shapes(rows: list[dict], layer: str | None, shape_type: str | None) -> list[dict]:
     return [
         r for r in rows

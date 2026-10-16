@@ -16,7 +16,7 @@ import threading
 from collections import OrderedDict
 from pathlib import Path
 
-from . import sexpr, units
+from . import pcb_common, sexpr, units
 from .errors import ToolInputError
 
 _LOCK = threading.RLock()
@@ -270,6 +270,82 @@ def shapes(path: str, include_footprints: bool = False) -> list[dict]:
                 rows.extend(shape_row(pcbnew, g, ref) for g in fp.GraphicalItems()
                             if isinstance(g, pcbnew.PCB_SHAPE))
         return rows
+
+
+# --- board outline -------------------------------------------------------
+
+_CUTOUT_CAP = 50
+_DANGLING_CAP = 100
+
+
+def _chain_summary(chain) -> dict:
+    box = chain.BBox()
+    return {
+        "bbox": {"x": _mm(box.GetX()), "y": _mm(box.GetY()),
+                 "width": _mm(box.GetWidth()), "height": _mm(box.GetHeight())},
+        "area_mm2": round(abs(chain.Area()) / units.NM_PER_MM ** 2, 4),
+    }
+
+
+def outline(path: str) -> dict:
+    """Run KiCad's own board-outline builder over Edge.Cuts and report on it.
+
+    This is what the 3D viewer, STEP export and DRC use: board and footprint
+    Edge.Cuts shapes chained into closed polygons, each with its cutouts. When
+    the chain fails KiCad falls back to the bounding box, and every cutout is
+    silently lost.
+    """
+    pcbnew = _pcbnew()
+    with _LOCK:
+        board = load(path)
+        polys = pcbnew.SHAPE_POLY_SET()
+        valid = bool(board.GetBoardPolygonOutlines(polys, False))
+        edge = [r for r in shapes(path, include_footprints=True)
+                if r["layer"] == "Edge.Cuts"]
+        epsilon = _mm(board.GetOutlinesChainingEpsilon())
+
+        outlines = []
+        for i in range(polys.OutlineCount()):
+            entry = _chain_summary(polys.Outline(i))
+            cutouts = [_chain_summary(polys.Hole(i, j)) for j in range(polys.HoleCount(i))]
+            # The polygon's own area counts cutouts as board; subtract them.
+            entry["area_mm2"] = round(entry["area_mm2"] - sum(c["area_mm2"] for c in cutouts), 4)
+            entry["cutout_count"] = len(cutouts)
+            entry["cutouts"] = cutouts[:_CUTOUT_CAP]
+            outlines.append(entry)
+
+    dangling = pcb_common.dangling_ends(edge, epsilon)
+    problems = []
+    if not edge:
+        problems.append("No shapes on Edge.Cuts: the board has no outline.")
+    elif not valid:
+        problems.append(
+            "Edge.Cuts does not form closed outlines. KiCad falls back to the "
+            "bounding box, so the 3D view and exports lose every cutout."
+        )
+    if dangling:
+        problems.append(f"{len(dangling)} Edge.Cuts end(s) meet nothing within "
+                        f"{epsilon} mm; see dangling_ends.")
+    if len(outlines) > 1:
+        problems.append(f"{len(outlines)} separate board outlines; intended only "
+                        "for a panel or several boards in one file.")
+
+    out = {
+        "valid": valid,
+        "outline_count": len(outlines),
+        "outlines": outlines,
+        "edge_cuts_shapes": {
+            "board": sum("footprint" not in r for r in edge),
+            "footprints": sum("footprint" in r for r in edge),
+        },
+        "dangling_ends": dangling[:_DANGLING_CAP],
+        "problems": problems,
+    }
+    if not valid and not dangling and edge:
+        out["hint"] = ("No open ends, so the outline likely crosses itself or "
+                       "overlaps; run_drc with violation_type='invalid_outline' "
+                       "gives positions.")
+    return out
 
 
 # --- footprints ----------------------------------------------------------

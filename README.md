@@ -97,7 +97,7 @@ the client configuration that is an `env` entry:
 `get_board_summary`, `list_footprints`, `get_footprint`, `list_nets`,
 `get_layers`, `get_stackup`, `list_tracks_vias`, `list_zones`,
 `list_board_shapes`; live only:
-`get_selection`; files: `run_drc`
+`get_selection`; files: `validate_board_outline`, `run_drc`
 
 **Schematic** (files; works with KiCad closed) — `open_schematic`,
 `list_schematic_symbols`, `find_project_files`, `schematic_netlist`, `run_erc`,
@@ -360,6 +360,24 @@ board-level drawings are listed unless `include_footprints` is set. Then
 footprint graphics are listed too, each tagged with its footprint's reference,
 which matters because slots and cutouts often live inside a footprint. A
 polygon lists its first 200 points and gives the full count.
+
+### Board outline: `validate_board_outline`
+
+KiCad chains the `Edge.Cuts` shapes, the board's own and those inside
+footprints, into closed polygons. It does this for the 3D viewer, STEP export
+and DRC alike. When the chain does not close, KiCad uses the bounding box
+instead, so cutouts and milled slots disappear from the 3D view with no error
+in the editor. `validate_board_outline` runs that same builder on a saved
+`.kicad_pcb` and reports:
+
+- `valid`, and each outline's bounding box and area with its cutouts;
+- how many `Edge.Cuts` shapes are on the board and how many are in footprints;
+- `dangling_ends`, the ends that meet no other shape within KiCad's chaining
+  tolerance, which is where a gap is.
+
+A board can be invalid with no open ends, because its outline crosses or
+overlaps itself. Then `run_drc` with `violation_type: "invalid_outline"` gives
+the positions.
 
 ### Design rules: `run_drc`
 
