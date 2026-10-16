@@ -17,6 +17,7 @@ import threading
 import traceback
 from typing import Any
 
+from .errors import NotConnectedError
 from .session import SESSION
 
 
@@ -52,17 +53,57 @@ def _build_globals() -> dict[str, Any]:
     except Exception:  # noqa: BLE001 - optional
         env["pcbnew"] = None
 
+    # Why `kicad` or `board` is None is kept, not swallowed: a script that then
+    # fails on "'NoneType' object has no attribute" needs the real reason.
+    error: Exception | None = None
     try:
         env["kicad"] = SESSION.connect()
-    except Exception:  # noqa: BLE001 - script may not need a live connection
+    except Exception as exc:  # noqa: BLE001 - script may not need a live connection
         env["kicad"] = None
+        error = exc
 
     try:
         env["board"] = SESSION.board()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         env["board"] = None
+        error = error or exc
 
+    env["__connection_error__"] = error
+    env["connection_error"] = None if error is None else str(error)
+    env["board_commit"] = _board_commit(env["board"], error)
     return env
+
+
+def _board_commit(board, error: Exception | None):
+    """`with board_commit("message"):` -- every change inside is one undo step.
+
+    The commit is dropped if the block raises, so a failing script cannot leave
+    a commit open in KiCad.
+    """
+
+    @contextlib.contextmanager
+    def board_commit(message: str = ""):
+        if board is None:
+            raise NotConnectedError(
+                f"No board to commit to: {error or 'the PCB editor is not open'}"
+            )
+        commit = board.begin_commit()
+        try:
+            yield commit
+        except BaseException:
+            board.drop_commit(commit)
+            raise
+        board.push_commit(commit, message)
+
+    return board_commit
+
+
+def _connection_report(exc: Exception) -> dict:
+    out = {"error": type(exc).__name__, "message": str(exc)}
+    remedy = getattr(exc, "remedy", "")
+    if remedy:
+        out["remedy"] = remedy
+    return out
 
 
 def run_script(code: str, timeout: int = 30) -> dict:
@@ -108,6 +149,8 @@ def run_script(code: str, timeout: int = 30) -> dict:
     }
     if "traceback" in outcome:
         result["traceback"] = outcome["traceback"][-4000:]
+        if env["__connection_error__"] is not None:
+            result["live_connection"] = _connection_report(env["__connection_error__"])
     if "result" in env:
         try:
             result["result"] = repr(env["result"])[:8000]

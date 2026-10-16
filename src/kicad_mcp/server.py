@@ -930,8 +930,14 @@ def run_kicad_script(code: str, timeout: int = 30) -> dict:
     """Execute Python with the KiCad API pre-imported. Use this for anything the curated tools do not cover.
 
     Available names: `kicad` (live KiCad client), `board` (open board, or None),
-    `kipy`, `pcbnew`, and `sexpr` for KiCad file parsing.
+    `connection_error` (why they are None, else None), `kipy`, `pcbnew`, and
+    `sexpr` for KiCad file parsing.
     Print output is captured; assign to `result` to return a value.
+
+    Group live edits into one undo step with `with board_commit("message"):` --
+    it pushes on success and drops the commit if the block raises. In kipy
+    0.7.1, KIID takes keywords only: `KIID(value="...")`, or reuse `item.id`.
+    With KiCad closed, use `pcbnew.LoadBoard(path)` for file-based PCB work.
 
     This runs arbitrary local code with your privileges. Do not import kipy.schematic - it is broken in kipy 0.7.1 and KiCad 10 has no schematic API anyway.
     """

@@ -370,6 +370,17 @@ stale copy and your hand edits will be the ones lost.
 `sexpr` pre-bound. It exists so the server covers the whole API surface without
 hundreds of thin tool wrappers, which measurably degrade tool selection.
 
+When KiCad cannot be reached, `kicad` and `board` are `None` and
+`connection_error` says why; a script that fails then also returns a
+`live_connection` entry with the error and its remedy, instead of leaving only
+`'NoneType' object has no attribute ...`. A cached connection is pinged before
+reuse, so a KiCad restart does not leave the server holding a dead socket.
+
+`with board_commit("Move J1"):` groups live edits into one undo step; it drops
+the commit if the block raises, so a failing script never leaves one open. In
+kipy 0.7.1 `KIID` takes keywords only -- `KIID(value="...")`, or reuse an
+item's `.id`.
+
 **This is arbitrary local code execution with your privileges.** That is the
 deliberate trade for full API access. Run this server only against KiCad
 instances and files you trust.

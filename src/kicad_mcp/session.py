@@ -48,7 +48,14 @@ class Session:
     def connect(self, force: bool = False):
         with self._lock:
             if self._kicad is not None and not force:
-                return self._kicad
+                # A cached client outlives KiCad: after a crash or restart its
+                # socket is dead, and handing it out turns every later call into
+                # a timeout. One version ping proves it is still answering.
+                try:
+                    self._kicad.get_version()
+                    return self._kicad
+                except Exception:  # noqa: BLE001 - any failure means reconnect
+                    self._kicad = None
             try:
                 from kipy import KiCad  # imported lazily so the server starts without KiCad
             except ImportError as exc:  # pragma: no cover - env-specific
