@@ -97,7 +97,7 @@ the client configuration that is an `env` entry:
 `get_board_summary`, `list_footprints`, `get_footprint`, `list_nets`,
 `get_layers`, `get_stackup`, `list_tracks_vias`, `list_zones`,
 `list_board_shapes`; live only:
-`get_selection`; files: `validate_board_outline`, `run_drc`
+`get_selection`; files: `validate_board_outline`, `run_drc`, `render_pcb_3d`
 
 **Schematic** (files; works with KiCad closed) — `open_schematic`,
 `list_schematic_symbols`, `find_project_files`, `schematic_netlist`, `run_erc`,
@@ -387,6 +387,24 @@ in the editor. `validate_board_outline` runs that same builder on a saved
 A board can be invalid with no open ends, because its outline crosses or
 overlaps itself. Then `run_drc` with `violation_type: "invalid_outline"` gives
 the positions.
+
+### Seeing the board in 3D: `render_pcb_3d`
+
+`render_pcb_3d` runs `kicad-cli pcb render`, which draws the same scene as the
+3D viewer: outline, cutouts, milled slots, holes, components and 3D models. It
+needs no GUI and KiCad can be closed. The tool returns the image itself as well
+as the file path, so a model can look at the board instead of asking you to
+open the 3D viewer:
+
+```json
+{"path": "C:/proj/board.kicad_pcb", "rotate": "-45,0,45", "quality": "high"}
+```
+
+`side` is `top`, `bottom`, `left`, `right`, `front` or `back`. `rotate` takes
+`X,Y,Z` degrees (`-45,0,45` is isometric). `zoom` and `perspective` adjust the
+camera. Renders go to the temp folder unless `output` names a `.png` or `.jpg`,
+so the project does not fill up with images. Set `inline` to `false` to get only
+the path.
 
 ### Design rules: `run_drc`
 

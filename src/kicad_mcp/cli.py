@@ -241,6 +241,51 @@ def export_plot(install, schematic: str | Path, fmt: str = "pdf",
     return result
 
 
+RENDER_SIDES = ("top", "bottom", "left", "right", "front", "back")
+RENDER_QUALITIES = ("basic", "high", "user", "job_settings")
+
+
+def render_pcb(install, board: str | Path, output: str | Path | None = None,
+               side: str = "top", width: int = 1600, height: int = 1200,
+               quality: str = "basic", rotate: str | None = None,
+               zoom: float = 1.0, perspective: bool = False) -> dict:
+    """Render the board in 3D to PNG or JPEG, as the 3D viewer would show it.
+
+    The default output goes to the temp folder, not the project: renders are
+    for looking at, and a project should not fill up with them.
+    """
+    src = _require_file(board, ".kicad_pcb")
+    if side not in RENDER_SIDES:
+        raise ToolInputError(f"Unknown side {side!r}.",
+                             remedy=f"Use one of: {', '.join(RENDER_SIDES)}.")
+    if quality not in RENDER_QUALITIES:
+        raise ToolInputError(f"Unknown quality {quality!r}.",
+                             remedy=f"Use one of: {', '.join(RENDER_QUALITIES)}.")
+    if width <= 0 or height <= 0:
+        raise ToolInputError("width and height must be positive pixels.")
+    if output:
+        out = Path(output)
+    else:
+        out = Path(tempfile.gettempdir()) / "kicad-mcp-renders" / f"{src.stem}-{side}.png"
+    if out.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+        raise ToolInputError(f"Cannot render to {out.name}.",
+                             remedy="Use a .png, .jpg or .jpeg output file.")
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    args = ["pcb", "render", "-o", str(out), "--side", side, "--width", str(width),
+            "--height", str(height), "--quality", quality, "--zoom", str(zoom)]
+    if rotate:
+        args += ["--rotate", rotate]
+    if perspective:
+        args.append("--perspective")
+    args.append(str(src))
+    result = run_cli(install, args)
+    # kicad-cli prints a line per layer it builds; only the verdict matters.
+    result["stdout"] = "\n".join(result["stdout"].splitlines()[-3:])
+    result["output_file"] = str(out) if out.is_file() else None
+    return result
+
+
 def summarize_drc_report(report: dict, violation_type: str | None = None,
                          severity: str | None = None, limit: int = 100) -> dict:
     """Counts over every violation, plus a filtered, capped list of them.

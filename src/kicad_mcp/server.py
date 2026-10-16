@@ -17,7 +17,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Image, MCPServer
 
 from . import cli as kcli
 from . import hierarchy, pcb_common, pcb_file, pcb_live, units
@@ -398,6 +398,28 @@ def run_drc(path: str, violation_type: str | None = None, severity: str | None =
     """
     return kcli.pcb_drc(install(), path, violation_type=violation_type,
                         severity=severity, limit=limit)
+
+
+@mcp.tool()
+@tool_result
+def render_pcb_3d(path: str, output: str | None = None, side: str = "top",
+                  width: int = 1600, height: int = 1200, quality: str = "basic",
+                  rotate: str | None = None, zoom: float = 1.0,
+                  perspective: bool = False, inline: bool = True) -> dict | list[dict | Image]:
+    """Render a .kicad_pcb in 3D via kicad-cli, as KiCad's 3D viewer shows it -- board outline, cutouts, milled slots, holes, components and 3D models. Works with KiCad closed.
+
+    `side`: top, bottom, left, right, front or back. `rotate` takes 'X,Y,Z'
+    degrees ('-45,0,45' is isometric). `quality`: basic, high, user or
+    job_settings. `output` is a .png/.jpg path; by default the image goes to
+    the temp folder. Returns the file path, and with `inline` (default) the
+    image itself to look at.
+    """
+    result = kcli.render_pcb(install(), path, output=output, side=side, width=width,
+                             height=height, quality=quality, rotate=rotate, zoom=zoom,
+                             perspective=perspective)
+    if inline and result.get("output_file"):
+        return [result, Image(path=result["output_file"])]
+    return result
 
 
 @mcp.tool()
