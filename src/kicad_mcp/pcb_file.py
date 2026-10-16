@@ -200,6 +200,78 @@ def zones(path: str) -> list[dict]:
         ]
 
 
+# --- graphic shapes ------------------------------------------------------
+
+#: Points listed per polygon; the count is always given in full.
+POLY_POINT_CAP = 200
+
+
+def _shape_kinds(pcbnew) -> dict:
+    return {
+        pcbnew.SHAPE_T_SEGMENT: "Segment",
+        pcbnew.SHAPE_T_ARC: "Arc",
+        pcbnew.SHAPE_T_CIRCLE: "Circle",
+        pcbnew.SHAPE_T_RECTANGLE: "Rectangle",
+        pcbnew.SHAPE_T_POLY: "Polygon",
+        pcbnew.SHAPE_T_BEZIER: "Bezier",
+    }
+
+
+def shape_row(pcbnew, shape, footprint: str | None = None) -> dict:
+    """One PCB_SHAPE as the dict pcb_live.shape_row builds from kipy."""
+    kind = _shape_kinds(pcbnew).get(shape.GetShape(), "Unknown")
+    row: dict = {
+        "uuid": str(shape.m_Uuid.AsString()),
+        "layer": str(shape.GetLayerName()),
+        "type": kind,
+        "width_mm": _mm(shape.GetWidth()),
+        "filled": bool(shape.IsSolidFill()),
+    }
+    if footprint is not None:
+        row["footprint"] = footprint
+    pt = units.point_to_mm
+    if kind == "Segment":
+        row.update(start=pt(shape.GetStart()), end=pt(shape.GetEnd()))
+    elif kind == "Arc":
+        row.update(start=pt(shape.GetStart()), mid=pt(shape.GetArcMid()),
+                   end=pt(shape.GetEnd()), center=pt(shape.GetCenter()),
+                   radius_mm=_mm(shape.GetRadius()))
+    elif kind == "Circle":
+        row.update(center=pt(shape.GetCenter()), radius_mm=_mm(shape.GetRadius()))
+    elif kind == "Rectangle":
+        a, b = shape.GetStart(), shape.GetEnd()
+        row.update(top_left={"x": _mm(min(a.x, b.x)), "y": _mm(min(a.y, b.y))},
+                   bottom_right={"x": _mm(max(a.x, b.x)), "y": _mm(max(a.y, b.y))})
+    elif kind == "Polygon":
+        poly = shape.GetPolyShape()
+        points = []
+        holes = 0
+        for i in range(poly.OutlineCount()):
+            holes += poly.HoleCount(i)
+            outline = poly.Outline(i)
+            points.extend(pt(outline.CPoint(j)) for j in range(outline.PointCount()))
+        row.update(outline_count=poly.OutlineCount(), hole_count=holes,
+                   point_count=len(points), points=points[:POLY_POINT_CAP])
+    elif kind == "Bezier":
+        row.update(start=pt(shape.GetStart()), control1=pt(shape.GetBezierC1()),
+                   control2=pt(shape.GetBezierC2()), end=pt(shape.GetEnd()))
+    return row
+
+
+def shapes(path: str, include_footprints: bool = False) -> list[dict]:
+    pcbnew = _pcbnew()
+    with _LOCK:
+        board = load(path)
+        rows = [shape_row(pcbnew, d) for d in board.GetDrawings()
+                if isinstance(d, pcbnew.PCB_SHAPE)]
+        if include_footprints:
+            for fp in board.GetFootprints():
+                ref = str(fp.GetReference())
+                rows.extend(shape_row(pcbnew, g, ref) for g in fp.GraphicalItems()
+                            if isinstance(g, pcbnew.PCB_SHAPE))
+        return rows
+
+
 # --- footprints ----------------------------------------------------------
 
 

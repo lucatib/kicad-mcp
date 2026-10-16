@@ -137,6 +137,62 @@ def tracks_vias(board) -> list[dict]:
     return items
 
 
+#: Points listed per polygon; the count is always given in full.
+POLY_POINT_CAP = 200
+
+
+def _value(v):
+    """kipy exposes some geometry as methods (Arc.center(), Circle.radius())."""
+    return v() if callable(v) else v
+
+
+def shape_row(board, shape, footprint: str | None = None) -> dict:
+    """One kipy BoardShape as the dict pcb_file.shape_row builds from pcbnew."""
+    kind = type(shape).__name__.removeprefix("Board")
+    pt = units.point_to_mm
+    row: dict[str, Any] = {
+        "uuid": str(shape.id.value),
+        "layer": board.get_layer_name(shape.layer),
+        "type": kind,
+        "width_mm": units.nm_to_mm(shape.attributes.stroke.width),
+        "filled": bool(shape.attributes.fill.filled),
+    }
+    if footprint is not None:
+        row["footprint"] = footprint
+    if kind == "Segment":
+        row.update(start=pt(shape.start), end=pt(shape.end))
+    elif kind == "Arc":
+        row.update(start=pt(shape.start), mid=pt(shape.mid), end=pt(shape.end),
+                   center=pt(_value(shape.center)),
+                   radius_mm=units.nm_to_mm(_value(shape.radius)))
+    elif kind == "Circle":
+        row.update(center=pt(shape.center), radius_mm=units.nm_to_mm(_value(shape.radius)))
+    elif kind == "Rectangle":
+        row.update(top_left=pt(shape.top_left), bottom_right=pt(shape.bottom_right))
+    elif kind == "Polygon":
+        points = []
+        holes = 0
+        for poly in shape.polygons:
+            holes += len(poly.holes)
+            points.extend(pt(n.point if n.has_point else n.arc.start)
+                          for n in poly.outline.nodes)
+        row.update(outline_count=len(shape.polygons), hole_count=holes,
+                   point_count=len(points), points=points[:POLY_POINT_CAP])
+    elif kind == "Bezier":
+        row.update(start=pt(shape.start), control1=pt(shape.control1),
+                   control2=pt(shape.control2), end=pt(shape.end))
+    return row
+
+
+def shapes(board, include_footprints: bool = False) -> list[dict]:
+    rows = [shape_row(board, s) for s in board.get_shapes()]
+    if include_footprints:
+        for fp in board.get_footprints():
+            ref = _ref(fp)
+            rows.extend(shape_row(board, s, ref) for s in fp.definition.shapes)
+    return rows
+
+
 def zones(board) -> list[dict]:
     return [
         {

@@ -95,7 +95,8 @@ the client configuration that is an `env` entry:
 
 **PCB** (the board open in KiCad, or a saved `.kicad_pcb` via `path`) —
 `get_board_summary`, `list_footprints`, `get_footprint`, `list_nets`,
-`get_layers`, `get_stackup`, `list_tracks_vias`, `list_zones`; live only:
+`get_layers`, `get_stackup`, `list_tracks_vias`, `list_zones`,
+`list_board_shapes`; live only:
 `get_selection`; files: `run_drc`
 
 **Schematic** (files; works with KiCad closed) — `open_schematic`,
@@ -342,6 +343,23 @@ layer. A board is loaded once per saved version, so repeated calls are cheap
 and an edited file is read again. `get_stackup` reads the file's own
 `(stackup ...)` section and says so when there is none, because KiCad then uses
 its default.
+
+### Board graphics: `list_board_shapes`
+
+Lines, arcs, circles, rectangles, polygons and beziers, each with its uuid,
+layer, type, stroke width, fill and geometry in millimetres. The board outline
+and its cutouts are on `Edge.Cuts`:
+
+```json
+{"layer": "Edge.Cuts", "path": "C:/proj/board.kicad_pcb"}
+```
+
+`layer` takes globs, and both name forms work: `F.SilkS` and `F.Silkscreen`,
+`Dwgs.User` and `User.Drawings`. `shape_type` narrows to one kind. Only
+board-level drawings are listed unless `include_footprints` is set. Then
+footprint graphics are listed too, each tagged with its footprint's reference,
+which matters because slots and cutouts often live inside a footprint. A
+polygon lists its first 200 points and gives the full count.
 
 ### Design rules: `run_drc`
 

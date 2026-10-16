@@ -20,7 +20,7 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 
 from . import cli as kcli
-from . import hierarchy, pcb_file, pcb_live, units
+from . import hierarchy, pcb_common, pcb_file, pcb_live, units
 from .discovery import find_install, find_installs
 from .editor import SchematicEditor, add_decoupling_capacitors as _add_decoupling_capacitors
 from .errors import KicadMcpError, NoEditorOpenError
@@ -246,6 +246,27 @@ def get_stackup(path: str | None = None) -> dict:
     if path:
         return pcb_file.stackup(path)
     return pcb_live.stackup(SESSION.board())
+
+
+@mcp.tool()
+@tool_result
+@_with_path_doc
+def list_board_shapes(layer: str | None = None, shape_type: str | None = None,
+                      include_footprints: bool = False, limit: int = 300,
+                      path: str | None = None) -> dict:
+    """List graphic shapes on a board: lines, arcs, circles, rectangles, polygons and beziers, with uuid, layer, stroke width and geometry in millimetres.
+
+    Filter by `layer` (glob; short names like 'F.SilkS' work) and `shape_type`
+    ('segment', 'arc', 'circle', 'rectangle', 'polygon', 'bezier'). Board
+    outline and cutouts are layer 'Edge.Cuts'. Set `include_footprints` to also
+    list footprint graphics -- slots, cutouts, courtyards -- each tagged with
+    its footprint's reference.
+    """
+    if path:
+        rows = pcb_file.shapes(path, include_footprints)
+    else:
+        rows = pcb_live.shapes(SESSION.board(), include_footprints)
+    return _cap(pcb_common.filter_shapes(rows, layer, shape_type), limit)
 
 
 @mcp.tool()
