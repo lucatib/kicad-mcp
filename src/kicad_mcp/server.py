@@ -20,7 +20,7 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 
 from . import cli as kcli
-from . import hierarchy, units
+from . import hierarchy, pcb_file, pcb_live, units
 from .discovery import find_install, find_installs
 from .editor import SchematicEditor, add_decoupling_capacitors as _add_decoupling_capacitors
 from .errors import KicadMcpError, NoEditorOpenError
@@ -160,153 +160,92 @@ def kicad_status() -> dict:
     return out
 
 
-# --- live PCB ------------------------------------------------------------
+# --- PCB -----------------------------------------------------------------
+#
+# Every read tool takes an optional `path`. Without it the tool asks the board
+# open in KiCad (live, unsaved edits included); with it the tool reads that
+# .kicad_pcb through pcbnew, so it works with KiCad closed.
+
+_PATH_DOC = (
+    " Pass `path` (a .kicad_pcb) to read the saved file instead of the live "
+    "board; that works with KiCad closed."
+)
+
+
+def _with_path_doc(fn):
+    fn.__doc__ = (fn.__doc__ or "") + _PATH_DOC
+    return fn
 
 
 @mcp.tool()
 @tool_result
-def get_board_summary() -> dict:
-    """Summarise the board open in KiCad: name, layer count, item counts, title block, and origin. A cheap orientation call before more specific queries."""
-    board = SESSION.board()
-    counts = {
-        "footprints": len(board.get_footprints()),
-        "tracks": len(board.get_tracks()),
-        "vias": len(board.get_vias()),
-        "zones": len(board.get_zones()),
-        "pads": len(board.get_pads()),
-        "shapes": len(board.get_shapes()),
-        "text": len(board.get_text()),
-        "nets": len(board.get_nets()),
-    }
-    out: dict[str, Any] = {
-        "name": getattr(board, "name", None),
-        "copper_layers": board.get_copper_layer_count(),
-        "counts": counts,
-    }
-    try:
-        tb = board.get_title_block_info()
-        out["title_block"] = {
-            "title": tb.title, "date": tb.date, "revision": tb.revision,
-            "company": tb.company,
-        }
-    except Exception:  # noqa: BLE001 - optional metadata
-        pass
-    try:
-        out["origin"] = units.point_to_mm(board.get_origin())
-    except Exception:  # noqa: BLE001
-        pass
-    return out
+@_with_path_doc
+def get_board_summary(path: str | None = None) -> dict:
+    """Summarise a board: name, layer count, item counts, title block, and origin. A cheap orientation call before more specific queries."""
+    if path:
+        return pcb_file.summary(path)
+    return pcb_live.summary(SESSION.board())
 
 
 @mcp.tool()
 @tool_result
+@_with_path_doc
 def list_footprints(reference: str | None = None, value: str | None = None,
-                    limit: int = 200) -> dict:
-    """List footprints on the open board. Filter with glob patterns on reference (e.g. 'R*') or value (e.g. '10k'). Positions are millimetres."""
-    board = SESSION.board()
-    items = []
-    for fp in board.get_footprints():
-        ref = fp.reference_field.text.value if hasattr(fp, "reference_field") else ""
-        val = fp.value_field.text.value if hasattr(fp, "value_field") else ""
-        if not _match(ref, reference) or not _match(val, value):
-            continue
-        items.append({
-            "reference": ref,
-            "value": val,
-            "library_id": str(getattr(fp, "definition", None) and fp.definition.id or ""),
-            "position": units.point_to_mm(fp.position),
-            "rotation": units.angle_to_deg(getattr(fp, "orientation", None)),
-            "layer": board.get_layer_name(fp.layer) if hasattr(fp, "layer") else None,
-        })
+                    limit: int = 200, path: str | None = None) -> dict:
+    """List footprints on a board. Filter with glob patterns on reference (e.g. 'R*') or value (e.g. '10k'). Positions are millimetres."""
+    rows = pcb_file.footprints(path) if path else pcb_live.footprints(SESSION.board())
+    items = [r for r in rows if _match(r["reference"], reference) and _match(r["value"], value)]
     items.sort(key=lambda d: d["reference"])
     return _cap(items, limit)
 
 
 @mcp.tool()
 @tool_result
-def get_footprint(reference: str) -> dict:
-    """Full detail for one footprint on the open board, including every pad with its net, position, and layer."""
-    board = SESSION.board()
-    for fp in board.get_footprints():
-        ref = fp.reference_field.text.value if hasattr(fp, "reference_field") else ""
-        if ref.lower() != reference.lower():
-            continue
-        pads = []
-        for pad in fp.definition.pads if hasattr(fp, "definition") else []:
-            pads.append({
-                "number": getattr(pad, "number", ""),
-                "net": getattr(getattr(pad, "net", None), "name", ""),
-                "position": units.point_to_mm(getattr(pad, "position", None)),
-            })
-        return {
-            "reference": ref,
-            "value": fp.value_field.text.value if hasattr(fp, "value_field") else "",
-            "position": units.point_to_mm(fp.position),
-            "rotation": units.angle_to_deg(getattr(fp, "orientation", None)),
-            "layer": board.get_layer_name(fp.layer) if hasattr(fp, "layer") else None,
-            "pad_count": len(pads),
-            "pads": pads[:200],
-        }
+@_with_path_doc
+def get_footprint(reference: str, path: str | None = None) -> dict:
+    """Full detail for one footprint, including every pad with its net, position, and layer."""
+    if path:
+        found = pcb_file.footprint(path, reference)
+    else:
+        found = pcb_live.footprint(SESSION.board(), reference)
+    if found is not None:
+        return found
     return {
         "error": "NotFound",
-        "message": f"No footprint with reference {reference!r} on the open board.",
+        "message": f"No footprint with reference {reference!r} on the board.",
         "remedy": "Call list_footprints to see available references.",
     }
 
 
 @mcp.tool()
 @tool_result
-def list_nets(name: str | None = None, limit: int = 300) -> dict:
-    """List nets on the open board, optionally filtered by a glob pattern on the net name."""
-    board = SESSION.board()
-    items = [
-        {"name": n.name, "code": getattr(n, "code", None)}
-        for n in board.get_nets()
-        if _match(n.name, name)
-    ]
+@_with_path_doc
+def list_nets(name: str | None = None, limit: int = 300, path: str | None = None) -> dict:
+    """List nets on a board, optionally filtered by a glob pattern on the net name."""
+    rows = pcb_file.nets(path) if path else pcb_live.nets(SESSION.board())
+    items = [r for r in rows if _match(r["name"], name)]
     items.sort(key=lambda d: d["name"])
     return _cap(items, limit)
 
 
 @mcp.tool()
 @tool_result
-def get_layers() -> dict:
+@_with_path_doc
+def get_layers(path: str | None = None) -> dict:
     """List the board's enabled, visible, and active layers with their names."""
-    board = SESSION.board()
-    enabled = list(board.get_enabled_layers())
-    visible = set(board.get_visible_layers())
-    active = board.get_active_layer()
-    return {
-        "copper_layer_count": board.get_copper_layer_count(),
-        "active_layer": board.get_layer_name(active),
-        "layers": [
-            {
-                "name": board.get_layer_name(layer),
-                "visible": layer in visible,
-                "active": layer == active,
-            }
-            for layer in enabled
-        ],
-    }
+    if path:
+        return pcb_file.layers(path)
+    return pcb_live.layers(SESSION.board())
 
 
 @mcp.tool()
 @tool_result
-def get_stackup() -> dict:
+@_with_path_doc
+def get_stackup(path: str | None = None) -> dict:
     """The board's physical stackup: layer order, materials, and thicknesses."""
-    board = SESSION.board()
-    stackup = board.get_stackup()
-    layers = []
-    for layer in getattr(stackup, "layers", []):
-        layers.append({
-            "name": getattr(layer, "user_name", "") or board.get_layer_name(layer.layer),
-            "type": str(getattr(layer, "type", "")),
-            "material": getattr(layer, "material_name", ""),
-            "thickness_mm": units.nm_to_mm(getattr(layer, "thickness", None)),
-            "dielectric": getattr(layer, "dielectric", None),
-            "enabled": getattr(layer, "enabled", None),
-        })
-    return {"layer_count": len(layers), "layers": layers}
+    if path:
+        return pcb_file.stackup(path)
+    return pcb_live.stackup(SESSION.board())
 
 
 @mcp.tool()
@@ -328,46 +267,21 @@ def get_selection() -> dict:
 
 @mcp.tool()
 @tool_result
-def list_tracks_vias(net: str | None = None, limit: int = 300) -> dict:
-    """List tracks and vias on the open board, optionally filtered by net name."""
-    board = SESSION.board()
-    items: list[dict] = []
-    for track in board.get_tracks():
-        net_name = getattr(getattr(track, "net", None), "name", "")
-        if net and not _match(net_name, net):
-            continue
-        items.append({
-            "kind": type(track).__name__,
-            "net": net_name,
-            "start": units.point_to_mm(getattr(track, "start", None)),
-            "end": units.point_to_mm(getattr(track, "end", None)),
-            "width_mm": units.nm_to_mm(getattr(track, "width", None)),
-        })
-    for via in board.get_vias():
-        net_name = getattr(getattr(via, "net", None), "name", "")
-        if net and not _match(net_name, net):
-            continue
-        items.append({
-            "kind": "Via",
-            "net": net_name,
-            "position": units.point_to_mm(getattr(via, "position", None)),
-        })
-    return _cap(items, limit)
+@_with_path_doc
+def list_tracks_vias(net: str | None = None, limit: int = 300,
+                     path: str | None = None) -> dict:
+    """List tracks and vias on a board, optionally filtered by net name."""
+    rows = pcb_file.tracks_vias(path) if path else pcb_live.tracks_vias(SESSION.board())
+    return _cap([r for r in rows if not net or _match(r["net"], net)], limit)
 
 
 @mcp.tool()
 @tool_result
-def list_zones(limit: int = 100) -> dict:
-    """List copper zones on the open board with their nets and layers."""
-    board = SESSION.board()
-    items = []
-    for zone in board.get_zones():
-        items.append({
-            "name": getattr(zone, "name", ""),
-            "net": getattr(getattr(zone, "net", None), "name", ""),
-            "filled": getattr(zone, "filled", None),
-        })
-    return _cap(items, limit)
+@_with_path_doc
+def list_zones(limit: int = 100, path: str | None = None) -> dict:
+    """List copper zones on a board with their nets and layers."""
+    rows = pcb_file.zones(path) if path else pcb_live.zones(SESSION.board())
+    return _cap(rows, limit)
 
 
 # --- schematic (file-based) ---------------------------------------------

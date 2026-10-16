@@ -93,13 +93,14 @@ the client configuration that is an `env` entry:
 
 **Environment** — `kicad_status`
 
-**Live PCB** (needs KiCad running with the PCB editor open) — `get_board_summary`,
-`list_footprints`, `get_footprint`, `list_nets`, `get_layers`, `get_stackup`,
-`get_selection`, `list_tracks_vias`, `list_zones`
+**PCB** (the board open in KiCad, or a saved `.kicad_pcb` via `path`) —
+`get_board_summary`, `list_footprints`, `get_footprint`, `list_nets`,
+`get_layers`, `get_stackup`, `list_tracks_vias`, `list_zones`; live only:
+`get_selection`; files: `run_drc`
 
 **Schematic** (files; works with KiCad closed) — `open_schematic`,
 `list_schematic_symbols`, `find_project_files`, `schematic_netlist`, `run_erc`,
-`export_bom`, `export_schematic`, `run_drc`
+`export_bom`, `export_schematic`
 
 **Symbol libraries** — `list_symbol_libraries`, `search_symbols`, `get_symbol_pins`,
 `create_library_symbol`
@@ -323,6 +324,24 @@ labels, and `dry_run` to verify without writing.
 
 The output is a normal `.kicad_sch` you can open and keep editing. It is written
 directly, so KiCad does not need to be running.
+
+### Reading a board with KiCad closed
+
+The PCB read tools ask the board open in KiCad's PCB editor by default, which
+includes unsaved edits. Give them `path` and they read that `.kicad_pcb` instead,
+through KiCad's bundled `pcbnew` module, with KiCad closed or a different board
+open:
+
+```json
+{"reference": "J*", "path": "C:/proj/board.kicad_pcb"}
+```
+
+The answer has the same shape either way. Only the source differs: the file is
+the last saved state, and it has no GUI state, so `get_layers` reports no active
+layer. A board is loaded once per saved version, so repeated calls are cheap
+and an edited file is read again. `get_stackup` reads the file's own
+`(stackup ...)` section and says so when there is none, because KiCad then uses
+its default.
 
 ### Design rules: `run_drc`
 
