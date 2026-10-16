@@ -202,12 +202,13 @@ def list_footprints(reference: str | None = None, value: str | None = None,
 @mcp.tool()
 @tool_result
 @_with_path_doc
-def get_footprint(reference: str, path: str | None = None) -> dict:
-    """Full detail for one footprint, including every pad with its net, position, and layer."""
+def get_footprint(reference: str, include_shapes: bool = False,
+                  path: str | None = None) -> dict:
+    """Full detail for one footprint: every pad with its net, position, type (SMD, PTH, NPTH), copper shape and size, and drill (circle or oblong slot, in mm), plus its 3D models with offset, rotation and scale. Set `include_shapes` to add the footprint's graphics -- silkscreen, courtyard, fab, Edge.Cuts slots -- grouped by layer."""
     if path:
-        found = pcb_file.footprint(path, reference)
+        found = pcb_file.footprint(path, reference, include_shapes)
     else:
-        found = pcb_live.footprint(SESSION.board(), reference)
+        found = pcb_live.footprint(SESSION.board(), reference, include_shapes)
     if found is not None:
         return found
     return {

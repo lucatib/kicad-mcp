@@ -361,6 +361,15 @@ footprint graphics are listed too, each tagged with its footprint's reference,
 which matters because slots and cutouts often live inside a footprint. A
 polygon lists its first 200 points and gives the full count.
 
+### What a footprint is made of: `get_footprint`
+
+Besides its pads' nets, `get_footprint` gives each pad's type (`SMD`, `PTH`,
+`NPTH`, `Connector`), copper shape and size, and drill: `circle` or `oblong`
+(a slot), with its size in mm, or `null` for SMD. It also lists the
+footprint's 3D models with filename, offset (mm), rotation (degrees), scale
+and visibility. With `include_shapes` it adds the footprint's graphics grouped
+by layer: silkscreen, courtyard, fab, and any `Edge.Cuts` slot.
+
 ### Board outline: `validate_board_outline`
 
 KiCad chains the `Edge.Cuts` shapes, the board's own and those inside

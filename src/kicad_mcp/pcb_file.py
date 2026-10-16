@@ -367,19 +367,70 @@ def footprints(path: str) -> list[dict]:
         return [_footprint_row(fp) for fp in load(path).GetFootprints()]
 
 
-def footprint(path: str, reference: str) -> dict | None:
+_PAD_TYPES = {"PAD_ATTRIB_SMD": "SMD", "PAD_ATTRIB_PTH": "PTH",
+              "PAD_ATTRIB_NPTH": "NPTH", "PAD_ATTRIB_CONN": "Connector"}
+_PAD_SHAPES = {"PAD_SHAPE_CIRCLE": "circle", "PAD_SHAPE_RECTANGLE": "rectangle",
+               "PAD_SHAPE_OVAL": "oval", "PAD_SHAPE_TRAPEZOID": "trapezoid",
+               "PAD_SHAPE_ROUNDRECT": "roundrect",
+               "PAD_SHAPE_CHAMFERED_RECT": "chamfered_rect", "PAD_SHAPE_CUSTOM": "custom"}
+_DRILL_SHAPES = {"PAD_DRILL_SHAPE_CIRCLE": "circle", "PAD_DRILL_SHAPE_OBLONG": "oblong"}
+
+
+def _by_value(pcbnew, names: dict) -> dict:
+    return {getattr(pcbnew, k): v for k, v in names.items() if hasattr(pcbnew, k)}
+
+
+def _size(v) -> dict:
+    return {"x": _mm(v.x), "y": _mm(v.y)}
+
+
+def pad_row(pcbnew, pad) -> dict:
+    """One pad as pcb_live.pad_row builds it: type, copper shape, size, drill."""
+    layer = pad.GetPrincipalLayer()
+    drill = pad.GetDrillSize()
+    return {
+        "number": str(pad.GetNumber()),
+        "net": str(pad.GetNetname()),
+        "position": units.point_to_mm(pad.GetPosition()),
+        "type": _by_value(pcbnew, _PAD_TYPES).get(pad.GetAttribute(), "Unknown"),
+        "shape": _by_value(pcbnew, _PAD_SHAPES).get(pad.GetShape(layer), "unknown"),
+        "size_mm": _size(pad.GetSize(layer)),
+        "drill": None if not (drill.x or drill.y) else {
+            "shape": _by_value(pcbnew, _DRILL_SHAPES).get(pad.GetDrillShape(), "unknown"),
+            "size_mm": _size(drill),
+        },
+    }
+
+
+def model_row(model) -> dict:
+    """A 3D model; pcbnew keeps its offset in mm and rotation in degrees."""
+    def xyz(v, digits=6):
+        return {"x": round(v.x, digits), "y": round(v.y, digits), "z": round(v.z, digits)}
+
+    return {
+        "filename": str(model.m_Filename),
+        "offset_mm": xyz(model.m_Offset),
+        "rotation_deg": xyz(model.m_Rotation, 4),
+        "scale": xyz(model.m_Scale),
+        "visible": bool(model.m_Show),
+    }
+
+
+def footprint(path: str, reference: str, include_shapes: bool = False) -> dict | None:
+    pcbnew = _pcbnew()
     with _LOCK:
         for fp in load(path).GetFootprints():
             if str(fp.GetReference()).lower() != reference.lower():
                 continue
-            row = _footprint_row(fp)
-            pads = [
-                {
-                    "number": str(pad.GetNumber()),
-                    "net": str(pad.GetNetname()),
-                    "position": units.point_to_mm(pad.GetPosition()),
-                }
-                for pad in fp.Pads()
-            ]
-            return {**row, "pad_count": len(pads), "pads": pads[:200]}
+            pads = [pad_row(pcbnew, pad) for pad in fp.Pads()]
+            out = {**_footprint_row(fp), "pad_count": len(pads), "pads": pads[:200],
+                   "models": [model_row(m) for m in fp.Models()]}
+            if include_shapes:
+                grouped: dict[str, list] = {}
+                for g in fp.GraphicalItems():
+                    if isinstance(g, pcbnew.PCB_SHAPE):
+                        row = shape_row(pcbnew, g)
+                        grouped.setdefault(row["layer"], []).append(row)
+                out["shapes"] = grouped
+            return out
     return None

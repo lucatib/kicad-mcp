@@ -65,19 +65,80 @@ def footprints(board) -> list[dict]:
     return [_footprint_row(board, fp) for fp in board.get_footprints()]
 
 
-def footprint(board, reference: str) -> dict | None:
+_PAD_TYPES = {"PT_SMD": "SMD", "PT_PTH": "PTH", "PT_NPTH": "NPTH",
+              "PT_EDGE_CONNECTOR": "Connector"}
+_PAD_SHAPES = {"PSS_CIRCLE": "circle", "PSS_RECTANGLE": "rectangle", "PSS_OVAL": "oval",
+               "PSS_TRAPEZOID": "trapezoid", "PSS_ROUNDRECT": "roundrect",
+               "PSS_CHAMFEREDRECT": "chamfered_rect", "PSS_CUSTOM": "custom"}
+_DRILL_SHAPES = {"DS_CIRCLE": "circle", "DS_OBLONG": "oblong"}
+
+
+def _enum(enum_type, value, names: dict, default: str) -> str:
+    try:
+        return names.get(enum_type.Name(value), default)
+    except ValueError:
+        return default
+
+
+def _size(v) -> dict:
+    return {"x": units.nm_to_mm(v.x), "y": units.nm_to_mm(v.y)}
+
+
+def pad_row(pad) -> dict:
+    """One pad as pcb_file.pad_row builds it: type, copper shape, size, drill."""
+    from kipy.proto.board import board_types_pb2 as bt  # noqa: PLC0415 - optional dep
+
+    stack = pad.padstack
+    copper = stack.copper_layers[0] if stack.copper_layers else None
+    diameter = stack.drill.diameter
+    return {
+        "number": getattr(pad, "number", ""),
+        "net": getattr(getattr(pad, "net", None), "name", ""),
+        "position": units.point_to_mm(getattr(pad, "position", None)),
+        "type": _enum(bt.PadType, pad.pad_type, _PAD_TYPES, "Unknown"),
+        "shape": _enum(bt.PadStackShape, copper.shape, _PAD_SHAPES, "unknown") if copper else None,
+        "size_mm": _size(copper.size) if copper else None,
+        "drill": None if not (diameter.x or diameter.y) else {
+            "shape": _enum(bt.DrillShape, stack.drill.shape, _DRILL_SHAPES, "unknown"),
+            "size_mm": _size(diameter),
+        },
+    }
+
+
+def model_row(model) -> dict:
+    """A 3D model.
+
+    The API reuses Vector3D (fields named *_nm) for scale, rotation and offset
+    alike and documents scale as a factor and rotation in degrees, i.e. raw
+    values; the offset is packed the same way, so it is FP_3DMODEL's mm.
+    """
+    def xyz(v, conv):
+        return {"x": conv(v.x), "y": conv(v.y), "z": conv(v.z)}
+
+    return {
+        "filename": model.filename,
+        "offset_mm": xyz(model.offset, lambda d: round(d, 6)),
+        "rotation_deg": xyz(model.rotation, lambda a: round(a, 4)),
+        "scale": xyz(model.scale, lambda s: round(s, 6)),
+        "visible": bool(model.visible),
+    }
+
+
+def footprint(board, reference: str, include_shapes: bool = False) -> dict | None:
     for fp in board.get_footprints():
         if _ref(fp).lower() != reference.lower():
             continue
-        pads = [
-            {
-                "number": getattr(pad, "number", ""),
-                "net": getattr(getattr(pad, "net", None), "name", ""),
-                "position": units.point_to_mm(getattr(pad, "position", None)),
-            }
-            for pad in (fp.definition.pads if hasattr(fp, "definition") else [])
-        ]
-        return {**_footprint_row(board, fp), "pad_count": len(pads), "pads": pads[:200]}
+        definition = fp.definition
+        pads = [pad_row(pad) for pad in definition.pads]
+        out = {**_footprint_row(board, fp), "pad_count": len(pads), "pads": pads[:200],
+               "models": [model_row(m) for m in definition.models]}
+        if include_shapes:
+            grouped: dict[str, list] = {}
+            for s in definition.shapes:
+                row = shape_row(board, s)
+                grouped.setdefault(row["layer"], []).append(row)
+            out["shapes"] = grouped
+        return out
     return None
 
 
