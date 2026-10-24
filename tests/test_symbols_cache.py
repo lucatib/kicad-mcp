@@ -89,3 +89,22 @@ def test_edited_library_file_is_reparsed(install, project):
     assert index.definition("Scratch:Gadget") is not None
     with pytest.raises(Exception):
         index.definition("Scratch:Widget")
+
+
+def test_tables_are_not_rebuilt_while_nothing_changed(install, project, monkeypatch):
+    # Every symbol lookup asks for the resolved tables; rebuilding ~220 stock
+    # rows each time was a third of the schematic tools' run time.
+    from kicad_mcp import symbols
+
+    (project / "sym-lib-table").write_text(TABLE_WITH_LIB, encoding="utf-8")
+    index = SymbolIndex(install, project)
+    first = index.entries
+    calls = []
+    real = symbols._read_table
+    monkeypatch.setattr(symbols, "_read_table", lambda *a, **k: calls.append(a) or real(*a, **k))
+    assert index.entries == first
+    assert calls == []
+    # An edit is still picked up at once.
+    time.sleep(0.02)
+    (project / "sym-lib-table").write_text(TABLE_EMPTY, encoding="utf-8")
+    assert "Scratch" not in index.entries

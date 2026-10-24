@@ -60,7 +60,19 @@ class PinInfo:
 
 def _config_dir(major: int) -> Path | None:
     base = discovery.user_config_root()
-    if base is None or not base.is_dir():
+    if base is None:
+        return None
+    try:
+        stamp = base.stat().st_mtime_ns  # a new version folder changes it
+    except OSError:
+        return None
+    return _config_dir_cached(str(base), major, stamp)
+
+
+@lru_cache(maxsize=8)
+def _config_dir_cached(base_str: str, major: int, stamp: int) -> Path | None:
+    base = Path(base_str)
+    if not base.is_dir():
         return None
     # Config dirs are named by major.minor; pick the one matching this install.
     candidates = sorted(
@@ -170,26 +182,58 @@ def _parse_table_rows(path_str: str, stamp: tuple[int, int]) -> tuple[tuple[str,
     return tuple(rows)
 
 
+def _stamps(paths) -> tuple:
+    out = []
+    for p in paths:
+        try:
+            st = p.stat()
+            out.append((st.st_mtime_ns, st.st_size))
+        except OSError:
+            out.append(None)
+    return tuple(out)
+
+
+#: (install root, project, table) -> (files consulted, their stamps, environment, result)
+_RESOLVED: dict[tuple, tuple] = {}
+
+
 def resolve_tables(install, project_dir: Path | None, table: str) -> dict[str, LibraryEntry]:
     """Every library a project sees through `table` (sym-lib-table or fp-lib-table).
 
     Global table first, then the stock one, then the project's -- later
     entries win on a name clash, matching KiCad, where a project library
     shadows a global one of the same nickname.
+
+    Every symbol lookup asks for this, and building it means expanding and
+    resolving a couple of hundred stock rows. The result is kept until one of
+    the files it was built from changes (a table, a nested table, or
+    kicad_common.json, whose Configure Paths feed the substitutions) or the
+    environment does, so an edit is still seen at once.
     """
+    cfg = _config_dir(install.major)
+    key = (str(getattr(install, "root", "")), str(project_dir), table, str(cfg))
+    env = hash(tuple(sorted(os.environ.items())))
+    hit = _RESOLVED.get(key)
+    if hit is not None and hit[2] == env and _stamps(hit[0]) == hit[1]:
+        return dict(hit[3])
+
     variables = _substitution_vars(install, project_dir)
     seen: set[Path] = set()
     found: list[LibraryEntry] = []
-
-    cfg = _config_dir(install.major)
+    consulted: list[Path] = [install.share_dir / "template" / table]
     if cfg:
+        consulted += [cfg / table, cfg / "kicad_common.json"]
         found.extend(_read_table(cfg / table, variables, seen))
     # Fall back to the stock table directly, so a machine whose user
     # config was never initialised still sees the shipped libraries.
     found.extend(_read_table(install.share_dir / "template" / table, variables, seen))
     if project_dir:
+        consulted.append(project_dir / table)
         found.extend(_read_table(project_dir / table, variables, seen))
-    return {e.name: e for e in found}
+    consulted += sorted(seen)
+    result = {e.name: e for e in found}
+    _RESOLVED[key] = (consulted, _stamps(consulted), env, result)
+    return dict(result)
 
 
 class SymbolIndex:
