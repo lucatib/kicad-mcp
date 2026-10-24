@@ -6,6 +6,8 @@ A model can act on "open the PCB editor"; it cannot act on a stack trace.
 
 from __future__ import annotations
 
+import sys
+
 
 class KicadMcpError(Exception):
     """Base error. `remedy` is shown to the caller alongside the message."""
@@ -28,12 +30,13 @@ class KicadMcpError(Exception):
 class KicadNotFoundError(KicadMcpError):
     remedy = (
         "Install KiCad 10, or set KICAD_MCP_KICAD_ROOT to the install directory "
-        r"(the one containing bin\kicad-cli.exe)."
+        + (r"(the one containing bin\kicad-cli.exe)." if sys.platform == "win32"
+           else "(on macOS, KiCad.app; elsewhere, the prefix holding bin/kicad-cli).")
     )
 
 
 class UnsupportedPlatformError(KicadMcpError):
-    remedy = "This server currently supports Windows only."
+    remedy = "This server supports Windows, Linux and macOS."
 
 
 class NotConnectedError(KicadMcpError):

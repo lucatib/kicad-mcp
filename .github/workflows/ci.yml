@@ -1,7 +1,7 @@
 name: CI
 
-# Windows-only by design: the server targets KiCad on Windows and
-# discovery.InstallResolver has a single Windows implementation.
+# discovery.InstallResolver has one implementation per platform; the unit tier
+# runs each of them on every OS against fake install trees.
 on:
   push:
     branches: [main]
@@ -10,9 +10,11 @@ on:
 
 jobs:
   test:
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
         python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4

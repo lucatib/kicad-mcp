@@ -1,6 +1,6 @@
 # kicad-mcp
 
-An MCP server for **KiCad 10** on Windows. Gives an LLM live access to the board
+An MCP server for **KiCad 10** on Windows, Linux and macOS. Gives an LLM live access to the board
 open in KiCad, file-based access to schematics, symbol library search, schematic
 generation from a firmware pinout, and a scripting escape hatch for everything
 else.
@@ -18,8 +18,12 @@ no cross-interpreter bridge.
 
 ## Install
 
-Create the venv from KiCad's own Python. Where that is depends on how KiCad was
-installed:
+Create the venv from KiCad's own Python, install the package into it, and run
+`doctor`. Only where that Python lives differs between platforms.
+
+### Windows
+
+Where KiCad's Python is depends on how KiCad was installed:
 
 | KiCad installed for | KiCad folder | Its Python |
 |---|---|---|
@@ -76,6 +80,54 @@ the client configuration that is an `env` entry:
 }
 ```
 
+### Linux
+
+Install KiCad 10 from your distribution or the KiCad PPA. The package puts
+`pcbnew` into the system Python, so the venv is built from that (some
+distributions ship it separately, e.g. `python3-kicad`; check with
+`python3 -c "import pcbnew"`):
+
+```bash
+/usr/bin/python3 -m venv --system-site-packages .venv
+```
+
+```bash
+.venv/bin/python -m pip install -e .
+```
+
+```bash
+.venv/bin/python -m kicad_mcp doctor
+```
+
+The server finds `kicad-cli` on `PATH`, in `/usr` and in `/usr/local`, and asks
+it for the version. Set `KICAD_MCP_KICAD_ROOT` to another prefix (the folder
+containing `bin/kicad-cli` and `share/kicad`) for a build elsewhere. Settings
+are read from `~/.config/kicad` (or `$XDG_CONFIG_HOME/kicad`).
+
+Flatpak and AppImage builds are not supported: their `kicad-cli` and `pcbnew`
+live inside the sandbox, where the host Python cannot import them.
+
+### macOS
+
+Use the official disk image. KiCad.app bundles its own Python framework:
+
+```bash
+/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3 -m venv --system-site-packages .venv
+```
+
+```bash
+.venv/bin/python -m pip install -e .
+```
+
+```bash
+.venv/bin/python -m kicad_mcp doctor
+```
+
+The server finds `KiCad.app` in `/Applications`, `/Applications/KiCad*/` and
+`~/Applications`, and reads the version from the bundle. For a copy elsewhere,
+set `KICAD_MCP_KICAD_ROOT` to `KiCad.app` or to the folder holding it. Settings
+are read from `~/Library/Preferences/kicad`.
+
 ## MCP client configuration
 
 ```json
@@ -88,6 +140,9 @@ the client configuration that is an `env` entry:
   }
 }
 ```
+
+On Linux and macOS the command is the venv's `bin/python`, e.g.
+`"/home/you/mcp_kicad/.venv/bin/python"`.
 
 ## Tools
 
@@ -410,6 +465,10 @@ camera. Renders go to the temp folder unless `output` names a `.png` or `.jpg`,
 so the project does not fill up with images. Set `inline` to `false` to get only
 the path.
 
+The renderer needs an OpenGL context. On a Linux machine with no display
+(no `DISPLAY` or Wayland session, e.g. over SSH) it fails; run the server under
+`xvfb-run` there.
+
 ### Design rules: `run_drc`
 
 `run_drc` runs `kicad-cli pcb drc` and parses the JSON report rather than
@@ -544,15 +603,17 @@ instances and files you trust.
 .venv/Scripts/python.exe -m pytest -q
 ```
 
-Tests marked `requires_kicad` need an installation for its symbol libraries.
-Live-IPC behaviour is verified manually — it needs a GUI session with a board
-open, which is not worth automating on Windows.
+(`.venv/bin/python` on Linux and macOS.) Tests marked `requires_kicad` need an
+installation for its symbol libraries. Live-IPC behaviour is verified manually —
+it needs a GUI session with a board open, which is not worth automating.
 
 ## Scope
 
-Windows only, by choice. `discovery.InstallResolver` is the single
-platform-aware seam, so adding macOS or Linux later means adding a resolver
-rather than threading `sys.platform` checks through the package.
+Windows, Linux (native packages) and macOS (KiCad.app). `discovery.InstallResolver`
+is the single platform-aware seam: each platform's resolver knows where KiCad
+installs, how an install is laid out, and where it keeps user settings, so the
+rest of the package has no `sys.platform` checks. The discovery tests run every
+resolver on every host against fake install trees.
 
 ## License
 
