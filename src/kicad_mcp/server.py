@@ -947,7 +947,7 @@ def run_kicad_script(code: str, timeout: int = 30) -> dict:
 
     Group live edits into one undo step with `with board_commit("message"):` --
     it pushes on success and drops the commit if the block raises. In kipy
-    0.7.1, KIID takes keywords only: `KIID(value="...")`, or reuse `item.id`.
+    0.7.1 and 0.8.0, KIID takes keywords only: `KIID(value="...")`, or reuse `item.id`.
     With KiCad closed, use `pcbnew.LoadBoard(path)` for file-based PCB work.
 
     This runs arbitrary local code with your privileges. Do not import kipy.schematic - it is broken in kipy 0.7.1 and KiCad 10 has no schematic API anyway.

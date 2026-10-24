@@ -552,8 +552,9 @@ standalone editor is a different one.
 **There is no schematic IPC API in KiCad 10.** This is not a binding bug. The
 `10.0` branch of `schematic_commands.proto` defines zero commands, and the full
 schematic type model exists only on `master` (KiCad 11 development).
-`kipy` 0.7.1 ships `master`-era Python wrappers against `10.0`-era generated
-protobuf, which is why `import kipy.schematic` raises `ImportError`. Regenerating
+`kipy` (0.7.1 and 0.8.0 alike) ships `master`-era Python wrappers against
+`10.0`-era generated protobuf, which is why `import kipy.schematic` raises
+`ImportError`. Regenerating
 the protos would clear the import and still return *"no handler available"* on
 every call.
 
@@ -594,8 +595,8 @@ reuse, so a KiCad restart does not leave the server holding a dead socket.
 
 `with board_commit("Move J1"):` groups live edits into one undo step; it drops
 the commit if the block raises, so a failing script never leaves one open. In
-kipy 0.7.1 `KIID` takes keywords only -- `KIID(value="...")`, or reuse an
-item's `.id`.
+kipy 0.7.1 and 0.8.0 `KIID` takes keywords only -- `KIID(value="...")`, or reuse
+an item's `.id`.
 
 **This is arbitrary local code execution with your privileges.** That is the
 deliberate trade for full API access. Run this server only against KiCad
