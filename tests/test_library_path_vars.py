@@ -16,7 +16,6 @@ from pathlib import Path
 
 import pytest
 
-from kicad_mcp import discovery
 from kicad_mcp.symbols import resolve_tables
 
 
@@ -39,7 +38,7 @@ def kicad(tmp_path, monkeypatch):
     appdata = tmp_path / "appdata"
     config = appdata / "kicad" / "10.0"
     config.mkdir(parents=True)
-    monkeypatch.setattr(discovery, "user_config_root", lambda: appdata / "kicad")
+    monkeypatch.setenv("APPDATA", str(appdata))
     monkeypatch.delenv("WE_SYMBOL_DIR", raising=False)
 
     share = tmp_path / "share"

@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from . import discovery, sexpr
+from . import sexpr
 from .errors import ToolInputError
 from .sexpr import Sym
 
@@ -59,8 +59,11 @@ class PinInfo:
 
 
 def _config_dir(major: int) -> Path | None:
-    base = discovery.user_config_root()
-    if base is None or not base.is_dir():
+    appdata = os.environ.get("APPDATA")
+    if not appdata:
+        return None
+    base = Path(appdata) / "kicad"
+    if not base.is_dir():
         return None
     # Config dirs are named by major.minor; pick the one matching this install.
     candidates = sorted(
@@ -84,7 +87,8 @@ def _substitution_vars(install, project_dir: Path | None) -> dict[str, str]:
         f"KICAD{major}_3DMODEL_DIR": str(share / "3dmodels"),
         f"KICAD{major}_TEMPLATE_DIR": str(share / "template"),
         f"KICAD{major}_3RD_PARTY": str(
-            discovery.user_documents_root() / f"{major}.0" / "3rdparty"
+            Path(os.environ.get("USERPROFILE", "")) / "Documents" / "KiCad"
+            / f"{major}.0" / "3rdparty"
         ),
     }
     # Preferences > Configure Paths: where third-party tables get their
@@ -439,7 +443,8 @@ def _top_level_names(text: str) -> list[str]:
 
 
 def _cache_dir() -> Path:
-    d = discovery.user_cache_root() / "kicad-mcp"
+    base = os.environ.get("LOCALAPPDATA") or os.environ.get("TEMP") or "."
+    d = Path(base) / "kicad-mcp"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

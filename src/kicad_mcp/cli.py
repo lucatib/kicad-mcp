@@ -43,8 +43,7 @@ def run_cli(install, args: list[str], timeout: int = DEFAULT_TIMEOUT) -> dict:
             stdin=subprocess.DEVNULL,
             # Clients launch the server without a console, so Windows would
             # give kicad-cli a fresh visible one -- stealing focus every call.
-            # Elsewhere a child gets no window of its own; the flag is absent.
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
     except subprocess.TimeoutExpired as exc:
         raise CliError(

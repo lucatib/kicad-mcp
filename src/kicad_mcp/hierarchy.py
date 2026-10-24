@@ -115,8 +115,7 @@ def _walk(root: Path) -> tuple[dict[str, list[str]], dict[str, tuple[Path, sexpr
     """Instance paths of every file under `root`, and each file parsed.
 
     Sheet file names are relative to the schematic holding the sheet symbol,
-    as KiCad resolves them. Keys go through normcase, so they compare as the
-    platform's paths do: case-folded on Windows, exact elsewhere.
+    as KiCad resolves them. Keys are case-folded, as Windows paths compare.
     """
     uses: dict[str, list[str]] = {}
     trees: dict[str, tuple[Path, sexpr.SExpr | None]] = {}

@@ -27,9 +27,8 @@ def run_checks() -> tuple[list[str], bool]:
     lines: list[str] = []
     ok = True
 
-    if not (sys.platform in ("win32", "darwin") or sys.platform.startswith("linux")):
-        lines.append(_line(FAIL, "Platform", sys.platform,
-                           "This server supports Windows, Linux and macOS."))
+    if sys.platform != "win32":
+        lines.append(_line(FAIL, "Platform", sys.platform, "This server supports Windows only."))
         return lines, False
     lines.append(_line(PASS, "Platform", sys.platform))
 
@@ -55,13 +54,11 @@ def run_checks() -> tuple[list[str], bool]:
         lines.append(_line(PASS, "pcbnew (SWIG)", pcbnew.GetBuildVersion()))
     except Exception as exc:  # noqa: BLE001
         ok = False
-        remedy = ('Create the venv from KiCad\'s interpreter: '
-                  f'"{inst.python_path}" -m venv --system-site-packages .venv')
-        if sys.platform.startswith("linux"):
-            # Distributions ship pcbnew in the KiCad package itself (some split
-            # it out, e.g. python3-kicad); the system python3 then imports it.
-            remedy += ". Check that python3 -c 'import pcbnew' works first."
-        lines.append(_line(FAIL, "pcbnew (SWIG)", str(exc), remedy))
+        lines.append(_line(
+            FAIL, "pcbnew (SWIG)", str(exc),
+            'Create the venv from KiCad\'s interpreter: '
+            f'"{inst.python_path}" -m venv --system-site-packages .venv',
+        ))
 
     try:
         import kipy
@@ -86,10 +83,9 @@ def run_checks() -> tuple[list[str], bool]:
     # single most common reason live tools fail on an otherwise healthy install.
     try:
         import json
+        import os
 
-        from .discovery import user_config_root
-
-        cfg = Path(user_config_root() or "") / f"{inst.major}.0" / "kicad_common.json"
+        cfg = Path(os.environ.get("APPDATA", "")) / "kicad" / f"{inst.major}.0" / "kicad_common.json"
         if cfg.is_file():
             data = json.loads(cfg.read_text(encoding="utf-8"))
             enabled = bool(data.get("api", {}).get("enable_server"))
