@@ -11,11 +11,13 @@ always written; what the Altium files disagree on is reported, never fixed.
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 from .. import cli
-from ..errors import ToolInputError
+from ..errors import KicadMcpError, ToolInputError
 from . import board as bd
 from . import design as dz
 from . import model, pcbdoc, sheets, symbols, variants, verify
@@ -188,10 +190,97 @@ def import_altium(install, sources, output_dir: str | None = None, project_name:
     return convert(install, check_inputs(sources, output_dir, project_name, overwrite))
 
 
+class ImportFailedError(KicadMcpError):
+    """The import stopped partway; the output folder was left as it was."""
+
+
+#: Files every import writes besides those its report lists (older reports
+#: did not list them).
+_ALWAYS_WRITTEN = ("import_report.json", "parity.json", sheets.DRAWING_SHEET)
+
+
 def convert(install, inputs: Inputs) -> dict:
+    """Build the project in a staging folder and move it into place only when complete.
+
+    A failure at any step removes the staging folder and leaves the output
+    folder exactly as it was -- absent, or holding the previous import -- so
+    nothing half-written is left for the next run to trip over.
+    """
+    out = inputs.out
+    work = out.parent / f".{out.name}.importing"
+    shutil.rmtree(work, ignore_errors=True)  # left by a run that was killed
+    work.mkdir(parents=True)
+    stage = ["reading the Altium files"]
+    try:
+        report = _relocate(_build(install, inputs, work, stage), str(work), str(out))
+        (work / "import_report.json").write_text(
+            json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        stage[0] = f"moving the project into {out}"
+        _publish(work, out)
+    except Exception as exc:
+        shutil.rmtree(work, ignore_errors=True)
+        detail = exc.message if isinstance(exc, KicadMcpError) else f"{type(exc).__name__}: {exc}"
+        state = "was left as it was" if out.exists() else "was not created"
+        raise ImportFailedError(
+            f"Import stopped while {stage[0]}: {detail}. {out} {state}.",
+            remedy=(exc.remedy if isinstance(exc, KicadMcpError) and exc.remedy
+                    else "Fix the cause and run the import again; nothing needs cleaning up."),
+        ) from exc
+
+    summary = dict(report)
+    for key in ("source_disagreements", "issues", "net_renames", "approximations", "not_converted",
+                "inferred", "files"):
+        summary[key] = _cap(report[key])
+    if report["net_check"]:
+        summary["net_check"] = dict(report["net_check"],
+                                    topology_differences=_cap(report["net_check"]["topology_differences"]))
+    if report["parity"]:
+        summary["parity"] = dict(report["parity"], unexplained=_cap(report["parity"]["unexplained"]))
+    summary["report_file"] = str(out / "import_report.json")
+    return summary
+
+
+def _relocate(obj, old: str, new: str):
+    """The report with staging-folder paths turned into output-folder paths."""
+    if isinstance(obj, str):
+        return new + obj[len(old):] if obj.startswith(old) else obj
+    if isinstance(obj, list):
+        return [_relocate(x, old, new) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _relocate(v, old, new) for k, v in obj.items()}
+    return obj
+
+
+def _previous_files(out: Path) -> set[str]:
+    """Names of the files an earlier import wrote into `out`, from its report."""
+    try:
+        old = json.loads((out / "import_report.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    names = {Path(f).name for f in old.get("files", []) if isinstance(f, str)}
+    if isinstance(old.get("project"), str):
+        names.add(Path(old["project"]).name)
+    return names | set(_ALWAYS_WRITTEN)
+
+
+def _publish(work: Path, out: Path) -> None:
+    """Put the staged project in place, replacing only what an earlier import wrote."""
+    if not out.exists():
+        out.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(work, out)
+        return
+    new = {p.name for p in work.iterdir()}
+    for name in _previous_files(out) - new:
+        (out / name).unlink(missing_ok=True)
+    for p in work.iterdir():
+        os.replace(p, out / p.name)
+    work.rmdir()
+
+
+def _build(install, inputs: Inputs, out: Path, stage: list[str]) -> dict:
+    """Everything the import writes, into `out` (the staging folder); returns the report."""
     sch_files, board_file, prj = inputs.sch_files, inputs.board_file, inputs.prj
-    sheet_list, name, out = inputs.sheet_list, inputs.name, inputs.out
-    out.mkdir(parents=True, exist_ok=True)
+    sheet_list, name = inputs.sheet_list, inputs.name
 
     board_parts = pcbdoc.read_board_parts(board_file) if board_file else None
     design = dz.build_design(sheet_list, name, board_parts, prj)
@@ -199,7 +288,9 @@ def convert(install, inputs: Inputs) -> dict:
     pcb_path = out / f"{name}.kicad_pcb"
     board_text, board_refs, board_issues, joins, import_report = "", {}, [], [], None
     if board_file:
+        stage[0] = "converting the board with kicad-cli"
         import_report = bd.import_board(install, board_file, pcb_path)
+        stage[0] = "linking footprints to the schematic"
         raw = pcb_path.read_text(encoding="utf-8")
         joins = bd.join_footprints(raw, board_parts)
         board_text, board_refs, board_issues = bd.rewrite_board(raw, joins, design)
@@ -232,6 +323,7 @@ def convert(install, inputs: Inputs) -> dict:
     instance_changes, footprint_changes, variant_report = variants.plan(design, refs, prj_variants)
     variant_names = [(v.name, v.description) for v in prj_variants]
     board_text = bd.add_variants(board_text, variant_names, footprint_changes)
+    stage[0] = "writing the schematic"
     written = sheets.write_sheets(design, out, refs, bd.footprint_fields(board_text), version,
                                   board_values, instance_changes)
     root_sch = out / f"{name}.kicad_sch"
@@ -241,6 +333,7 @@ def convert(install, inputs: Inputs) -> dict:
     exclude = {d["ref"] for d in disagreements if d["kind"] in ("board_only", "schematic_only", "moved_sheet")}
     net_check, renames, parity = None, {}, None
     if board_file and sheet_list:
+        stage[0] = "comparing the schematic's nets with the board's"
         sch_nets = verify.schematic_pin_nets(install, root_sch)
         net_check = verify.compare_nets(bd.board_pad_nets(board_text), sch_nets, exclude)
         renames = {b: s for b, s in net_check.pop("matched").items() if b != s}
@@ -250,10 +343,20 @@ def convert(install, inputs: Inputs) -> dict:
         board_text = bd.assign_pad_nets(board_text, lone)
     if board_file:
         pcb_path.write_text(board_text, encoding="utf-8")
+        stage[0] = "running KiCad's schematic parity check"
         parity = verify.parity(install, pcb_path, known, output=out / "parity.json")
-    erc = cli.erc_violation_count(install, root_sch) if sheet_list else None
 
     issues = design.issues + written["issues"]
+    erc = None
+    if sheet_list:
+        # ERC only informs the report; a failure to run it must not cost the project.
+        stage[0] = "running ERC"
+        try:
+            erc = cli.erc_violation_count(install, root_sch)
+        except Exception as exc:  # noqa: BLE001
+            issues.append({"kind": "erc_failed",
+                           "message": exc.message if isinstance(exc, KicadMcpError) else str(exc),
+                           "note": "the project is complete; run run_erc on it to retry"})
     if board_file and sheet_list:
         aligned = (not net_check["topology_differences"] and not parity["unexplained"]
                    and not parity.get("error")
@@ -284,17 +387,9 @@ def convert(install, inputs: Inputs) -> dict:
         "variants": variant_report,
         "unreferenced_sheets": design.unreferenced,
         "board_import": import_report and {k: import_report.get(k) for k in ("statistics", "errors", "warnings")},
-        "files": written["files"] + ([str(pcb_path)] if board_file else []),
+        # Every file in the folder, the report included, so a later overwrite
+        # knows exactly what this import wrote.
+        "files": sorted({str(p) for p in out.iterdir() if p.is_file()}
+                        | {str(out / "import_report.json")}),
     }
-    (out / "import_report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n",
-                                            encoding="utf-8")
-    summary = dict(report)
-    for key in ("source_disagreements", "issues", "net_renames", "approximations", "not_converted",
-                "inferred", "files"):
-        summary[key] = _cap(report[key])
-    if net_check:
-        summary["net_check"] = dict(net_check, topology_differences=_cap(net_check["topology_differences"]))
-    if parity:
-        summary["parity"] = dict(parity, unexplained=_cap(parity["unexplained"]))
-    summary["report_file"] = str(out / "import_report.json")
-    return summary
+    return report
