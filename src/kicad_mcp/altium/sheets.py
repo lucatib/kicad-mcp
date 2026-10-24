@@ -215,10 +215,11 @@ def _png(data: bytes) -> tuple[bytes, int, int] | None:
 # --- the writer -----------------------------------------------------------
 
 class _SheetWriter:
-    def __init__(self, design: Design, refs, footprint_fields, version: int):
+    def __init__(self, design: Design, refs, footprint_fields, version: int, board_values=None):
         self.d = design
         self.refs = refs
         self.fp = footprint_fields
+        self.values = board_values or {}
         self.version = version
         self.notes: Counter = Counter()
         self.not_converted: Counter = Counter()
@@ -361,8 +362,9 @@ class _SheetWriter:
                 instances = [(self.d.project_name, n.kicad_path, self.refs.get((n.kicad_path, u.uid), u.designator))
                              for n in nodes]
                 fp = next((self.fp[r] for _, _, r in instances if r in self.fp), "")
+                value = next((self.values[r] for _, _, r in instances if r in self.values), None)
                 placed.append(sy.placed_symbol("altium:" + lib_by_key[key], u, u.part_id, sid,
-                                               instances, fp, sheet.fonts, flip))
+                                               instances, fp, sheet.fonts, flip, value=value))
 
         # Power ports.
         power_libs: dict[str, sexpr.SExpr] = {}
@@ -471,10 +473,10 @@ class _SheetWriter:
 
 
 def write_sheets(design: Design, out_dir: Path, refs: dict, footprint_fields: dict[str, str],
-                 version: int) -> dict:
+                 version: int, board_values: dict[str, str] | None = None) -> dict:
     """Write every sheet of `design` into `out_dir`; report what was approximated or left out."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    writer = _SheetWriter(design, refs, footprint_fields, version)
+    writer = _SheetWriter(design, refs, footprint_fields, version, board_values)
     files = writer.write_all(out_dir)
     return {
         "files": files,

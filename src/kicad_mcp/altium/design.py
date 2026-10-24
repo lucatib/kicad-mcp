@@ -293,9 +293,18 @@ def instance_references(design: Design,
     refs: dict[tuple[str, str], str] = {}
     inferred_for: set[str] = set()
     for node in design.nodes():
+        # The board names one unit of a multi-part component; its siblings
+        # show the same reference.
+        unit_ref: dict[tuple[str, str], str] = {}
+        for part in node.sheet.parts:
+            key = (part.uid,) if design.flat else node.id_path + (part.uid,)
+            if part.part_count > 1 and key in board_refs:
+                unit_ref.setdefault((part.designator, part.libref), board_refs[key])
         for part in node.sheet.parts:
             key = (part.uid,) if design.flat else node.id_path + (part.uid,)
             ref = board_refs.get(key)
+            if ref is None and part.part_count > 1:
+                ref = unit_ref.get((part.designator, part.libref))
             if ref is None:
                 ref = part.designator
                 if node.kicad_path in channel_index and ref:

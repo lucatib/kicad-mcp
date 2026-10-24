@@ -40,6 +40,17 @@ def compare_nets(board: dict[str, PadSet], schematic: dict[str, PadSet],
     b, s = clean(board), clean(schematic)
     by_set = {pads: name for name, pads in s.items()}
     matched: dict[str, str] = {}
+    # One-pad nets join nothing, so they are no topology question, but their
+    # names still follow the schematic.
+    lone_sch = {}
+    for name, pads in schematic.items():
+        kept = {p for p in pads if p[0] not in exclude_refs}
+        if len(kept) == 1:
+            lone_sch[next(iter(kept))] = name
+    for name, pads in board.items():
+        kept = {p for p in pads if p[0] not in exclude_refs}
+        if len(kept) == 1 and next(iter(kept)) in lone_sch:
+            matched[name] = lone_sch[next(iter(kept))]
     diffs: list[dict] = []
     for name, pads in sorted(b.items()):
         if pads in by_set:
@@ -64,6 +75,22 @@ def compare_nets(board: dict[str, PadSet], schematic: dict[str, PadSet],
             "excluded_parts": sorted(exclude_refs)}
 
 
+_AUTO_NET = re.compile(r"((?:Net|unconnected)-\()(.*)(\))$")
+
+
+def kicad_net_name(name: str) -> str:
+    """A netlist name as the board must store it.
+
+    KiCad builds automatic names from pin names, where a "/" would read as a
+    sheet separator, so it stores it as {slash}; the XML netlist shows it
+    unescaped.
+    """
+    m = _AUTO_NET.search(name)
+    if not m:
+        return name
+    return name[:m.start()] + m.group(1) + m.group(2).replace("/", "{slash}") + m.group(3)
+
+
 def schematic_pin_nets(install, root_sch: Path) -> dict[str, PadSet]:
     with tempfile.TemporaryDirectory(prefix="kicad-mcp-") as tmp:
         xml = Path(tmp) / "net.xml"
@@ -72,7 +99,7 @@ def schematic_pin_nets(install, root_sch: Path) -> dict[str, PadSet]:
             raise cli.CliError(f"kicad-cli could not netlist {root_sch.name}: {result['stderr']}",
                                remedy="Open the converted schematic in KiCad to see why.")
         netlist = cli.parse_kicadxml_netlist(xml)
-    return {n["name"]: {(node["reference"], node["pin"]) for node in n["nodes"]}
+    return {kicad_net_name(n["name"]): {(node["reference"], node["pin"]) for node in n["nodes"]}
             for n in netlist["nets"]}
 
 
@@ -102,11 +129,42 @@ def summarize_parity(report: dict, known_refs: set[str]) -> dict:
             "unexplained": unexplained}
 
 
+#: Every DRC check that looks at copper, holes, silk or courtyards. Parity
+#: needs none of them, and on a dense board they take a quarter of an hour.
+PHYSICAL_CHECKS = (
+    "annular_width assertion_failure clearance connection_width copper_edge_clearance "
+    "copper_sliver courtyards_overlap creepage diff_pair_gap_out_of_range "
+    "diff_pair_uncoupled_length_too_long drill_out_of_range footprint footprint_filters_mismatch "
+    "footprint_type_mismatch generic_error generic_warning hole_clearance hole_to_hole "
+    "holes_co_located invalid_outline isolated_copper item_on_disabled_layer items_not_allowed "
+    "length_out_of_range lib_footprint_issues lib_footprint_mismatch malformed_courtyard "
+    "microvia_drill_out_of_range mirrored_text_on_front_layer missing_courtyard "
+    "missing_tuning_profile nonmirrored_text_on_back_layer npth_inside_courtyard padstack "
+    "padstack_invalid pth_inside_courtyard shorting_items silk_edge_clearance silk_over_copper "
+    "silk_overlap skew_out_of_range solder_mask_bridge starved_thermal text_height "
+    "text_on_edge_cuts text_thickness through_hole_pad_without_hole too_many_vias track_angle "
+    "track_dangling track_not_centered_on_via track_on_post_machined_layer track_segment_length "
+    "track_width tracks_crossing tuning_profile_track_geometries unconnected_items "
+    "unresolved_variable via_dangling via_diameter zones_intersect").split()
+
+
 def parity(install, pcb: Path, known_refs: set[str], output: Path | None = None,
            timeout: int = 900) -> dict:
+    """KiCad's schematic parity, run on a copy whose project ignores every physical check."""
+    import shutil  # noqa: PLC0415
+
     out = output or pcb.with_suffix(".parity.json")
-    cli.run_cli(install, ["pcb", "drc", "--schematic-parity", "--format", "json", "--severity-all",
-                          "-o", str(out), str(pcb)], timeout=timeout)
+    with tempfile.TemporaryDirectory(prefix="kicad-mcp-") as tmp:
+        for f in pcb.parent.iterdir():
+            if f.suffix in (".kicad_sch", ".kicad_pcb", ".kicad_pro", ".kicad_wks"):
+                shutil.copy(f, Path(tmp) / f.name)
+        pro = Path(tmp) / (pcb.stem + ".kicad_pro")
+        data = json.loads(pro.read_text(encoding="utf-8")) if pro.is_file() else {}
+        data.setdefault("board", {}).setdefault("design_settings", {})["rule_severities"] = {
+            k: "ignore" for k in PHYSICAL_CHECKS}
+        pro.write_text(json.dumps(data), encoding="utf-8")
+        cli.run_cli(install, ["pcb", "drc", "--schematic-parity", "--format", "json", "--severity-all",
+                              "-o", str(out), str(Path(tmp) / pcb.name)], timeout=timeout)
     try:
         report = json.loads(out.read_text(encoding="utf-8"))
     except (OSError, ValueError):

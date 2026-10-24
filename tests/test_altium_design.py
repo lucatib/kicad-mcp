@@ -160,3 +160,14 @@ def test_duplicate_sheet_names_get_channel_suffix(sampler_sheets, sampler_parts)
 def test_flat_sheet_names_are_stems(edp_parts):
     d = dz.build_design(_sheets("eDP"), "eDP", edp_parts, None)
     assert [c.human_path for c in d.root.children] == ["/it6251_core/", "/power/"]
+
+
+def test_other_units_take_the_linked_units_reference(sampler_sheets, sampler_parts):
+    d = dz.build_design(sampler_sheets, "Sampler", sampler_parts, None)
+    (ch,) = [c for c in d.root.children if c.sheet_symbol.uid == "GBVAIBAE"]
+    rn1 = [p for p in ch.sheet.parts if p.designator == "RN1"]
+    assert len(rn1) == 4
+    linked = next(p for p in rn1 if (ch.id_path + (p.uid,)) in {bp.id_path for bp in sampler_parts})
+    board_refs = {ch.id_path + (linked.uid,): "RN1Q"}
+    refs = dz.instance_references(d, board_refs)
+    assert {refs[(ch.kicad_path, p.uid)] for p in rn1} == {"RN1Q"}

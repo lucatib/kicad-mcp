@@ -38,7 +38,8 @@ def test_single_pad_nets_ignored():
     board = {"TP": {("TP1", "1")}, "N": {("R1", "1"), ("R2", "1")}}
     sch = {"unconnected-(TP1-Pad1)": {("TP1", "1")}, "/N": {("R1", "1"), ("R2", "1")}}
     out = verify.compare_nets(board, sch, set())
-    assert out["topology_differences"] == [] and out["matched"] == {"N": "/N"}
+    assert out["topology_differences"] == []
+    assert out["matched"] == {"N": "/N", "TP": "unconnected-(TP1-Pad1)"}
 
 
 def test_schematic_only_net_reported():
@@ -70,3 +71,19 @@ def test_parity_refs_parsed():
     assert verify.refs_in({"description": "Pad 12 [N] of U10C on Top Layer"}) == {"U10C"}
     assert verify.refs_in({"description": "Footprint C10C"}) == {"C10C"}
     assert verify.refs_in({"description": "Symbol R99 [Res]"}) == {"R99"}
+
+
+def test_auto_net_names_keep_kicads_slash_escape():
+    assert verify.kicad_net_name("unconnected-(U11P-NC/ADJ-Pad5)") == "unconnected-(U11P-NC{slash}ADJ-Pad5)"
+    assert verify.kicad_net_name("Net-(U1-A/B)") == "Net-(U1-A{slash}B)"
+    assert verify.kicad_net_name("/power/SDA") == "/power/SDA"
+
+
+def test_single_pad_nets_matched_for_renaming():
+    # A one-pad net is not a topology question, but its name still has to follow
+    # the schematic, or KiCad's update renames it.
+    board = {"EEM1_5_P": {("J2", "7")}, "N": {("R1", "1"), ("R2", "1")}}
+    sch = {"/U_LVDS_EEM1/EEM1_5_P": {("J2", "7")}, "/N": {("R1", "1"), ("R2", "1")}}
+    out = verify.compare_nets(board, sch, set())
+    assert out["matched"] == {"EEM1_5_P": "/U_LVDS_EEM1/EEM1_5_P", "N": "/N"}
+    assert out["topology_differences"] == []

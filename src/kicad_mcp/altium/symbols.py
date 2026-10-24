@@ -336,9 +336,24 @@ def field_node(name: str, value: str, param, fonts, flip: Flip, default_at, hide
                 effects({}, 0, size=DEFAULT_TEXT, hide=True))
 
 
+_RESERVED = ("Reference", "Value", "Footprint", "Datasheet", "Description")
+
+
+def parameter_fields(part: Part) -> dict:
+    """KiCad field name -> (text, Altium parameter) for a part's own parameters."""
+    out = {}
+    for name, param in part.params.items():
+        if not name or name.lower() in ("comment", "designator") or param.text in ("", "*"):
+            continue
+        if name in _RESERVED:
+            name = "Altium_" + name
+        out[name] = (param.text, param)
+    return out
+
+
 def placed_symbol(lib_id: str, part: Part, unit: int, uuid: str,
                   instances: list[tuple[str, str, str]], footprint: str, fonts, flip: Flip,
-                  altium_footprint: str | None = None) -> sexpr.SExpr:
+                  altium_footprint: str | None = None, value: str | None = None) -> sexpr.SExpr:
     """A symbol instance at the part's anchor, unrotated, with its fields."""
     at = flip.pt(part.x, part.y)
     node = make("symbol", make("lib_id", lib_id), make("at", at[0], at[1], 0), make("unit", unit),
@@ -347,20 +362,20 @@ def placed_symbol(lib_id: str, part: Part, unit: int, uuid: str,
     ref = instances[0][2] if instances else part.designator
     node.append(field_node("Reference", ref, part.designator_param, fonts, flip, at, False))
     value_param = part.param("Comment")
-    node.append(field_node("Value", part.value or part.libref, value_param, fonts, flip, at, False))
+    # An unresolved Altium comment (=Missing) shows nothing; then the board's
+    # value, if there is a board, else the library reference.
+    shown = part.value or (value if value is not None else part.libref)
+    node.append(field_node("Value", shown, value_param, fonts, flip, at, False))
     node.append(field_node("Footprint", footprint, None, fonts, flip, at, True))
     node.append(field_node("Datasheet", "", None, fonts, flip, at, True))
-    skip = {"comment", "designator"}
     if altium_footprint is None:
         altium_footprint = part.footprints[0] if part.footprints else ""
-    if altium_footprint:
+    # With a board the Footprint field already names the real footprint, and a
+    # field the footprint lacks would make KiCad's update add it everywhere.
+    if altium_footprint and not footprint:
         node.append(field_node("Altium_Footprint", altium_footprint, None, fonts, flip, at, True))
-    for name, param in part.params.items():
-        if name.lower() in skip or not name or param.text in ("", "*"):
-            continue
-        if name in ("Reference", "Value", "Footprint", "Datasheet"):
-            name = "Altium_" + name
-        node.append(field_node(name, param.text, param, fonts, flip, at, param.hidden))
+    for name, (text, param) in parameter_fields(part).items():
+        node.append(field_node(name, text, param, fonts, flip, at, param.hidden))
     paths = []
     for project, path, reference in instances:
         paths.append(make("path", path, make("reference", reference), make("unit", unit)))

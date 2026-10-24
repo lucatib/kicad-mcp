@@ -118,3 +118,27 @@ def test_join_sampler_channels(install, tmp_path_factory):
     assert {by_ref[f"C10{x}"].id_path[0] for x in "ABCDEFGH"} == {
         "GBVAIBAE", "YXCFEEXA", "YMGJCCJH", "MHXVSFEO", "BGKERBNH", "JMNDQDBV", "NOURFBSN", "TJKXBNXR"}
     assert by_ref["C10A"].id_path[0] == "GBVAIBAE" and by_ref["C10H"].id_path[0] == "TJKXBNXR"
+
+
+def test_assign_pad_nets_only_fills_empty_pads():
+    text = SAMPLE.replace('\t\t\t(net "SDA2")\n', "")
+    out = board.assign_pad_nets(text, {("R1", "2"): "unconnected-(R1-Pad2)", ("R1", "1"): "X"})
+    (fp,) = board.footprints(out)
+    assert fp.pads == {"1": "SDA", "2": "unconnected-(R1-Pad2)"}
+
+
+def test_add_fields_only_missing_and_hidden():
+    out = board.add_fields(SAMPLE, {"R1": {"Published": "2017", "Reference": "ignored"}})
+    (fp,) = board.footprints(out)
+    assert out.count('(property "Published" "2017"') == 1
+    assert out.count('(property "Reference"') == 1
+    block = out[out.index('(property "Published"'):]
+    assert "(hide yes)" in block.split("\t\t)")[0]
+    assert board.add_fields(out, {"R1": {"Published": "2017"}}) == out
+
+
+def test_fill_values_only_where_empty():
+    text = SAMPLE.replace('\t\t(path "/x/y")', '\t\t(property "Value" ""\n\t\t\t(at 0 0 0)\n\t\t)\n\t\t(path "/x/y")')
+    out = board.fill_values(text, {"R1": "Connector 30 Male"})
+    assert board.footprints(out)[0].value == "Connector 30 Male"
+    assert board.fill_values(out, {"R1": "other"}) == out

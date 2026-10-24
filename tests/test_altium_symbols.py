@@ -113,3 +113,31 @@ def test_placed_symbol_fields_and_instances(power):
     assert at[1:3] == [pytest.approx(part.x), pytest.approx(210.0 // 1.27 * 1.27 - part.y)]
     inst = sexpr.child(sexpr.child(sexpr.child(node, "instances"), "project"), "path")
     assert inst[1] == "/root/sheet" and sexpr.value(inst, "reference") == "C13P"
+
+
+def test_altium_footprint_field_only_without_board(power):
+    part = next(p for p in power.parts if p.designator == "C13P")
+    flip = symbols.Flip(210.0)
+
+    def fields(fp):
+        node = symbols.placed_symbol("altium:Cap_Semi", part, 1, "u", [("p", "/r", "C13P")],
+                                     footprint=fp, fonts=power.fonts, flip=flip)
+        return {p[1] for p in sexpr.children(node, "property")}
+
+    assert "Altium_Footprint" not in fields("Lib:CAP")
+    assert "Altium_Footprint" in fields("")
+
+
+def test_unresolved_comment_takes_board_value(tmp_path):
+    from kicad_mcp.altium.model import Param
+    sheet = model.load_sheet(altium_fixture("eDP/power.SchDoc"))
+    part = next(p for p in sheet.parts if p.designator == "C13P")
+    part.params["Comment"] = Param("Comment", "=Missing", 0, 0, False, 1, 0, 0, None)
+
+    def value(board_value):
+        node = symbols.placed_symbol("altium:X", part, 1, "u", [("p", "/r", "C13P")], footprint="",
+                                     fonts=sheet.fonts, flip=symbols.Flip(210), value=board_value)
+        return {p[1]: p[2] for p in sexpr.children(node, "property")}["Value"]
+
+    assert value("") == ""
+    assert value(None) == part.libref

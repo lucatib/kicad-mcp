@@ -115,6 +115,8 @@ the client configuration that is an `env` entry:
 `move_symbol_fields`, `add_decoupling_capacitors`, `remove_symbols`,
 `disconnect_pins`, `rename_labels`, `edit_notes`, `route_nets`
 
+**Import** (files; works with KiCad closed) — `import_altium`
+
 **Escape hatch** — `run_kicad_script`
 
 ### Libraries
@@ -422,6 +424,58 @@ The list it returns is capped at `limit` and can be narrowed:
 
 `violation_type` takes globs (`silk_*`) and `severity` is `error` or `warning`.
 The complete report stays on disk at `report_file`.
+
+### Importing from Altium: `import_altium`
+
+```json
+{"sources": "C:/altium/eDP_adapter"}
+```
+
+`sources` is a folder or a list of `.SchDoc` and `.PcbDoc` files. A `.PrjPcb`
+is optional: loose sheets and a board are enough, and so are sheets alone or a
+board alone. The result is a KiCad project in `<name>_kicad` beside the
+sources, whose schematic and board are already linked. The tool refuses a
+folder that is not empty unless `overwrite` is set. The Altium files are only
+read.
+
+What it does:
+
+- **The board** is converted by `kicad-cli pcb import`, as KiCad's own
+  importer does.
+- **The schematic** is converted here, because KiCad has no headless importer
+  for `.SchDoc`. Wires, buses, junctions, net labels, ports, power ports, sheet
+  symbols, notes, text frames and drawings land where Altium put them. Symbols
+  are rebuilt from the graphics placed on each sheet, so no Altium library is
+  needed. A multi-part component becomes a symbol with several units.
+- **The hierarchy** is found from the sheet symbols. A flat design gets a root
+  sheet made for it, and a sheet used by several sheet symbols (a channel) is
+  written once, with one instance per use.
+- **Designators are never changed.** Each footprint is linked to its symbol
+  through Altium's UniqueIds, sheet by sheet and channel by channel, so `R12`
+  on the schematic is `R12` on the board, `C10A` to `C10H` included.
+- **Net names follow the schematic.** Board nets are renamed to what KiCad
+  calls them (`/power/SDA`). The symbols' Altium parameters are copied onto
+  their footprints, so the first "Update PCB from Schematic" changes nothing.
+
+What it reports:
+
+- **`aligned`** is true only when KiCad's own checks agree: DRC's schematic
+  parity, and a pad-by-pad comparison of every net with the board's.
+- **`source_disagreements`** lists what the Altium files already disagree on:
+  - a part moved to another sheet but never pushed to the board
+    (`moved_sheet`);
+  - parts on only one side (`board_only`, `schematic_only`);
+  - different values or footprints on the two sides;
+  - duplicate designators.
+
+  These are listed, not fixed.
+- **`not_converted` and `approximations`** list what has no KiCad counterpart:
+  directives, harnesses, images linked to files that are missing, rounded
+  corners.
+- **`inferred`** lists what the tool had to decide, such as sheet names made
+  unique or channel designators worked out with no board to read them from.
+
+The full report is `import_report.json` in the project folder.
 
 ## Two things to know about KiCad 10
 

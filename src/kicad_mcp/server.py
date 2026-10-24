@@ -20,6 +20,7 @@ from typing import Any
 from mcp.server.mcpserver import Image, MCPServer
 
 from . import cli as kcli
+from .altium.importer import import_altium as _import_altium
 from . import hierarchy, pcb_common, pcb_file, pcb_live, units
 from .discovery import find_install, find_installs
 from .editor import SchematicEditor, add_decoupling_capacitors as _add_decoupling_capacitors
@@ -34,7 +35,7 @@ from . import wiring
 
 mcp = MCPServer(
     name="kicad",
-    version="0.1.0",
+    version="0.2.0",
     instructions=(
         "Tools for KiCad 10. Live PCB access needs KiCad running with the PCB "
         "editor open; schematic tools work on files and need neither. "
@@ -434,6 +435,32 @@ def export_bom(path: str, output: str | None = None) -> dict:
 def export_schematic(path: str, fmt: str = "pdf", output: str | None = None) -> dict:
     """Plot a schematic to pdf, svg, dxf, ps, or hpgl via kicad-cli."""
     return kcli.export_plot(install(), path, fmt, output)
+
+
+# --- import --------------------------------------------------------------
+
+
+@mcp.tool()
+@tool_result
+def import_altium(sources: list[str] | str, output_dir: str | None = None,
+                  project_name: str | None = None, overwrite: bool = False) -> dict:
+    """Convert Altium Designer files into a KiCad project whose schematic and board are already linked. Works with KiCad closed.
+
+    `sources` is a folder or a list of .SchDoc / .PcbDoc files; a .PrjPcb is
+    optional (loose sheets and a board are enough). Designators are never
+    changed: each footprint is linked to its symbol through Altium's
+    UniqueIds, sheet by sheet and channel by channel. Whatever the Altium
+    files themselves disagree on (a part moved to another sheet but never
+    pushed to the board, a value changed on one side) is listed in
+    `source_disagreements`, not fixed. `aligned` is true only when KiCad's
+    own schematic-parity check and the pad-by-pad net comparison agree.
+
+    The project goes to `output_dir` (default `<name>_kicad` beside the
+    sources), which must be empty unless `overwrite`. The full report is
+    `import_report.json` there; the result caps each list at 50 entries.
+    """
+    return _import_altium(install(), sources, output_dir=output_dir,
+                          project_name=project_name, overwrite=overwrite)
 
 
 # --- symbol libraries ----------------------------------------------------

@@ -30,6 +30,7 @@ JOIN_TOLERANCE_MM = 0.05
 _FP_START = re.compile(r'^\t\(footprint "([^"]*)"', re.M)
 _AT = re.compile(r'^\t\t\(at ([-\d.e]+) ([-\d.e]+)(?: ([-\d.e]+))?\)', re.M)
 _REF = re.compile(r'^\t\t\(property "Reference" "((?:[^"\\]|\\.)*)"', re.M)
+_VALUE = re.compile(r'^\t\t\(property "Value" "((?:[^"\\]|\\.)*)"', re.M)
 _PATH = re.compile(r'^\t\t\(path "([^"]*)"\)', re.M)
 _PAD = re.compile(r'^\t\t\(pad "((?:[^"\\]|\\.)*)"', re.M)
 _NET = re.compile(r'\(net "((?:[^"\\]|\\.)*)"\)')
@@ -46,6 +47,7 @@ class Footprint:
     y: float
     path: str | None
     pads: dict[str, str] = field(default_factory=dict)
+    value: str = ""
 
     @property
     def symbol_uuid(self) -> str | None:
@@ -71,6 +73,7 @@ def footprints(text: str) -> list[Footprint]:
         lib = _FP_START.match(block).group(1)
         at = _AT.search(block)
         ref = _REF.search(block)
+        value = _VALUE.search(block)
         path = _PATH.search(block)
         pads: dict[str, str] = {}
         pad_starts = [m for m in _PAD.finditer(block)]
@@ -82,7 +85,8 @@ def footprints(text: str) -> list[Footprint]:
         out.append(Footprint(index=i, start=start, end=end, lib_id=lib,
                              ref=_unescape(ref.group(1)) if ref else "",
                              x=float(at.group(1)) if at else 0.0, y=float(at.group(2)) if at else 0.0,
-                             path=path.group(1) if path else None, pads=pads))
+                             path=path.group(1) if path else None, pads=pads,
+                             value=_unescape(value.group(1)) if value else ""))
     return out
 
 
@@ -196,6 +200,94 @@ def rewrite_board(text: str, joins: list[tuple[Footprint, BoardPart | None]],
         last = end
     out.append(text[last:])
     return "".join(out), refs, issues
+
+
+def assign_pad_nets(text: str, nets: dict[tuple[str, str], str]) -> str:
+    """Give pads that have no net the net the schematic gives them.
+
+    The schematic names every unconnected pin's net (`unconnected-(U1-Pad3)`);
+    the board leaves those pads netless, and KiCad's first update would fill
+    them in. A pad that already has a net is never touched.
+    """
+    if not nets:
+        return text
+    inserts: list[tuple[int, str]] = []
+    for fp in footprints(text):
+        block = text[fp.start:fp.end]
+        pad_starts = list(_PAD.finditer(block))
+        for j, m in enumerate(pad_starts):
+            name = nets.get((fp.ref, _unescape(m.group(1))))
+            if name is None:
+                continue
+            pad_end = pad_starts[j + 1].start() if j + 1 < len(pad_starts) else len(block)
+            if _NET.search(block, m.end(), pad_end):
+                continue
+            line_end = block.index("\n", m.end())
+            inserts.append((fp.start + line_end, f'\n\t\t\t(net "{_escape(name)}")'))
+    for pos, line in sorted(inserts, reverse=True):
+        text = text[:pos] + line + text[pos:]
+    return text
+
+
+_PROP = re.compile(r'^\t\t\(property "((?:[^"\\]|\\.)*)"', re.M)
+_FIELD = '''
+\t\t(property "{name}" "{value}"
+\t\t\t(at 0 0 0)
+\t\t\t(layer "F.Fab")
+\t\t\t(hide yes)
+\t\t\t(uuid "{uuid}")
+\t\t\t(effects
+\t\t\t\t(font
+\t\t\t\t\t(size 1.27 1.27)
+\t\t\t\t\t(thickness 0.15)
+\t\t\t\t)
+\t\t\t)
+\t\t)'''
+
+
+def add_fields(text: str, fields: dict[str, dict[str, str]]) -> str:
+    """Add the symbol's fields a footprint lacks, hidden on F.Fab.
+
+    KiCad's "Update PCB from Schematic" copies symbol fields onto footprints;
+    adding them now keeps that first update from touching every part.
+    Existing fields are never changed.
+    """
+    import uuid as _uuid  # noqa: PLC0415
+
+    inserts: list[tuple[int, str]] = []
+    for fp in footprints(text):
+        wanted = fields.get(fp.ref)
+        if not wanted:
+            continue
+        block = text[fp.start:fp.end]
+        have = {_unescape(m.group(1)) for m in _PROP.finditer(block)}
+        props = list(_PROP.finditer(block))
+        if not props:
+            continue
+        # After the last existing property, at the end of its closing line.
+        last = props[-1]
+        close = block.index("\n\t\t)", last.end()) + len("\n\t\t)")
+        added = "".join(_FIELD.format(name=_escape(n), value=_escape(v),
+                                      uuid=_uuid.uuid5(_uuid.NAMESPACE_URL, f"{fp.ref}:{n}"))
+                        for n, v in wanted.items() if n not in have)
+        if added:
+            inserts.append((fp.start + close, added))
+    for pos, chunk in sorted(inserts, reverse=True):
+        text = text[:pos] + chunk + text[pos:]
+    return text
+
+
+def fill_values(text: str, values: dict[str, str]) -> str:
+    """Set the Value of footprints whose Value is empty; others are left alone."""
+    edits = []
+    for fp in footprints(text):
+        if fp.ref in values and fp.value == "":
+            block = text[fp.start:fp.end]
+            new = _VALUE.sub(lambda m: f'\t\t(property "Value" "{_escape(values[fp.ref])}"', block, count=1)
+            edits.append((fp.start, fp.end, new))
+    for start, end, new in reversed(edits):
+        text = text[:start] + new + text[end:]
+    return text
 
 
 def rename_nets(text: str, renames: dict[str, str]) -> str:
