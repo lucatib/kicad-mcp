@@ -145,3 +145,22 @@ def test_list_variants_without_any(tmp_path):
     from kicad_mcp import server
     out = server.list_variants(str(_project(tmp_path, ())))
     assert out["variants"] == [] and "no variants" in out["note"]
+
+
+@pytest.mark.requires_kicad
+def test_bom_keeps_designators_that_end_in_a_letter(tmp_path):
+    # KiCad's BOM shows "U1A?" for a reference ending in a letter (Altium's
+    # channel style, C10A); only a really unannotated part keeps its "?".
+    try:
+        install = find_install()
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"KiCad not installed: {exc}")
+    sch = _project(tmp_path)
+    text = sch.read_text(encoding="utf-8")
+    sch.write_text(text.replace('(reference "U1")', '(reference "U1A")', 1)
+                   .replace('(property "Reference" "U1"', '(property "Reference" "U1A"', 1), encoding="utf-8")
+    out = tmp_path / "b.csv"
+    res = cli.export_bom(install, sch, out)
+    rows = list(csv.DictReader(io.StringIO(out.read_text(encoding="utf-8"))))
+    assert [r["Refs"] for r in rows if r["Refs"].startswith("U1")] == ["U1A"]
+    assert res["references_fixed"] == 1

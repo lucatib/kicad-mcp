@@ -313,6 +313,49 @@ def erc_violation_count(install, schematic: str | Path) -> int:
     return sum(len(sheet.get("violations", [])) for sheet in report.get("sheets", []))
 
 
+def _fix_bom_references(install, schematic: Path, bom: Path, variant: str | None) -> int:
+    """Take the "?" off references KiCad's BOM wrongly shows as unannotated.
+
+    The BOM splits each reference into prefix and number, so one ending in a
+    letter (C10A, Altium's channel style) prints as "C10A?". A reference the
+    netlist really has loses the "?"; a truly unannotated "R?" keeps it.
+    Returns how many references were fixed.
+    """
+    import csv  # noqa: PLC0415
+    import io  # noqa: PLC0415
+
+    text = bom.read_text(encoding="utf-8")
+    if "?" not in text:
+        return 0
+    with tempfile.TemporaryDirectory(prefix="kicad-mcp-") as tmp:
+        xml = Path(tmp) / "net.xml"
+        res = export_netlist(install, schematic, xml, variant=variant)
+        if res["returncode"] != 0 or not xml.is_file():
+            return 0
+        known = {c["reference"] for c in parse_kicadxml_netlist(xml)["components"]}
+    rows = list(csv.reader(io.StringIO(text)))
+    if not rows:
+        return 0
+    cols = [i for i, h in enumerate(rows[0]) if h.strip().lower() in ("refs", "reference", "references")]
+    fixed = 0
+    for row in rows[1:]:
+        for i in cols:
+            if i >= len(row):
+                continue
+            tokens = row[i].split(",")
+            for j, tok in enumerate(tokens):
+                stem = tok.strip()
+                if stem.endswith("?") and stem[:-1] in known:
+                    tokens[j] = tok.replace(stem, stem[:-1])
+                    fixed += 1
+            row[i] = ",".join(tokens)
+    if fixed:
+        buf = io.StringIO()
+        csv.writer(buf, quoting=csv.QUOTE_ALL, lineterminator="\n").writerows(rows)
+        bom.write_text(buf.getvalue(), encoding="utf-8")
+    return fixed
+
+
 def export_bom(install, schematic: str | Path, output: str | Path | None = None,
                variant: str | None = None) -> dict:
     src = _require_file(schematic, ".kicad_sch")
@@ -322,6 +365,7 @@ def export_bom(install, schematic: str | Path, output: str | Path | None = None,
     result["variant"] = variant
     result["output_file"] = str(out) if out.is_file() else None
     if out.is_file():
+        result["references_fixed"] = _fix_bom_references(install, src, out, variant)
         try:
             result["preview"] = out.read_text(encoding="utf-8", errors="replace")[:8000]
         except OSError:  # pragma: no cover
