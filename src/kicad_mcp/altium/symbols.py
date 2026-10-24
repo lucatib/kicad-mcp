@@ -374,7 +374,8 @@ def parameter_fields(part: Part) -> dict:
 
 def placed_symbol(lib_id: str, part: Part, unit: int, uuid: str,
                   instances: list[tuple[str, str, str]], footprint: str, fonts, flip: Flip,
-                  altium_footprint: str | None = None, value: str | None = None) -> sexpr.SExpr:
+                  altium_footprint: str | None = None, value: str | None = None,
+                  instance_variants: dict[str, list] | None = None) -> sexpr.SExpr:
     """A symbol instance at the part's anchor, unrotated, with its fields."""
     at = flip.pt(part.x, part.y)
     node = make("symbol", make("lib_id", lib_id), make("at", at[0], at[1], 0), make("unit", unit),
@@ -399,7 +400,8 @@ def placed_symbol(lib_id: str, part: Part, unit: int, uuid: str,
         node.append(field_node(name, text, param, fonts, flip, at, param.hidden))
     paths = []
     for project, path, reference in instances:
-        paths.append(make("path", path, make("reference", reference), make("unit", unit)))
+        paths.append(make("path", path, make("reference", reference), make("unit", unit),
+                          *(instance_variants or {}).get(path, [])))
     if instances:
         node.append(make("instances", make("project", instances[0][0], *paths)))
     return node

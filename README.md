@@ -542,6 +542,12 @@ What it does:
 - **Net names follow the schematic.** Board nets are renamed to what KiCad
   calls them (`/power/SDA`). The symbols' Altium parameters are copied onto
   their footprints, so the first "Update PCB from Schematic" changes nothing.
+- **Variants come along.** When a `.PrjPcb` is given, its project variants
+  become KiCad design variants. Each variation lands on the part its UniqueId
+  path names, channel copies included, on both the schematic and the board.
+  "Not fitted" parts are marked DNP and left out of the BOM and the position
+  files; alternate parts get the new value, description and footprint fields.
+  `list_variants` then shows them, and `export_bom` takes their names.
 
 What it reports:
 

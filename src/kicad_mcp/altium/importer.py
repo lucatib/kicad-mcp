@@ -18,7 +18,7 @@ from .. import cli
 from ..errors import ToolInputError
 from . import board as bd
 from . import design as dz
-from . import model, pcbdoc, sheets, symbols, verify
+from . import model, pcbdoc, sheets, symbols, variants, verify
 
 SUMMARY_CAP = 50
 
@@ -69,11 +69,13 @@ def _cap(items: list) -> dict:
     return out
 
 
-def _project_file(path: Path, design: dz.Design) -> None:
+def _project_file(path: Path, design: dz.Design, variant_names: list[tuple[str, str]]) -> None:
     sheets_list = [[n.kicad_uuid, n.name or (n.sheet.stem if n.sheet else "")]
                    for n in design.root.walk() if n is not design.root]
     data = {"meta": {"filename": path.name, "version": 3},
-            "schematic": {"page_layout_descr_file": sheets.DRAWING_SHEET},
+            "schematic": {"page_layout_descr_file": sheets.DRAWING_SHEET,
+                          "variants": [{"name": n, **({"description": d} if d and d != n else {})}
+                                       for n, d in variant_names]},
             "sheets": [[design.root_uuid, "Root"]] + sheets_list}
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
@@ -225,10 +227,15 @@ def convert(install, inputs: Inputs) -> dict:
             if ref and not part.value and ref not in board_values:
                 lone_values.setdefault(ref, part.libref)
     board_text = bd.fill_values(board_text, lone_values)
+    # Altium's project variants: on each symbol instance, each footprint and the project.
+    prj_variants = variants.read_variants(prj)
+    instance_changes, footprint_changes, variant_report = variants.plan(design, refs, prj_variants)
+    variant_names = [(v.name, v.description) for v in prj_variants]
+    board_text = bd.add_variants(board_text, variant_names, footprint_changes)
     written = sheets.write_sheets(design, out, refs, bd.footprint_fields(board_text), version,
-                                  board_values)
+                                  board_values, instance_changes)
     root_sch = out / f"{name}.kicad_sch"
-    _project_file(out / f"{name}.kicad_pro", design)
+    _project_file(out / f"{name}.kicad_pro", design, variant_names)
 
     known = {d["ref"] for d in disagreements if d.get("ref")}
     exclude = {d["ref"] for d in disagreements if d["kind"] in ("board_only", "schematic_only", "moved_sheet")}
@@ -274,6 +281,7 @@ def convert(install, inputs: Inputs) -> dict:
         "approximations": written["approximations"],
         "not_converted": written["not_converted"],
         "inferred": design.inferred,
+        "variants": variant_report,
         "unreferenced_sheets": design.unreferenced,
         "board_import": import_report and {k: import_report.get(k) for k in ("statistics", "errors", "warnings")},
         "files": written["files"] + ([str(pcb_path)] if board_file else []),

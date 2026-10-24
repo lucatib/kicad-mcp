@@ -157,7 +157,7 @@ def test_board_only(install, tmp_path):
 def test_sampler_end_to_end(install, tmp_path):
     src = _copy("sampler", tmp_path, {"ADC_8CH.SchDoc", "Input_channel.SchDoc", "LVDS_IFCA.SchDoc",
                                       "LVDS_IFCB.SchDoc", "Sampler.PCBDOC", "Sampler.schdoc",
-                                      "Supply_Sampler.SchDoc"})
+                                      "Supply_Sampler.SchDoc", "Sampler.PrjPCB"})
     result = importer.import_altium(install, str(src))
     assert "error" not in result, result
     out = importer.Path(result["output_dir"])
@@ -165,6 +165,13 @@ def test_sampler_end_to_end(install, tmp_path):
     report = json.loads((out / "import_report.json").read_text(encoding="utf-8"))
     assert report["parity"]["missing"] == 0 and report["parity"]["extra"] == 0
     assert report["parity"]["duplicates"] == 0
+    assert report["aligned"] is True
+    # Sampler's two Altium variants, every variation landing on its part.
+    got = {v["name"]: (v["not_fitted"], v["unmatched"]) for v in report["variants"]}
+    assert got == {"STD": (35, []), "4HP": (4, [])}
+    from kicad_mcp import cli
+    std = next(v for v in cli.variant_summary(out / "Sampler.kicad_sch")["variants"] if v["name"] == "STD")
+    assert {f"C17{x}" for x in "ABCDEFGH"} <= set(std["not_fitted"])
 
 
 @pytest.mark.requires_kicad

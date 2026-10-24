@@ -103,7 +103,7 @@ rests on them.
 - Separate `.kicad_sym` / `.pretty` libraries. Symbols and footprints live
   inside the project's schematic and board (user's decision).
 - Altium libraries (`.SchLib`, `.PcbLib`, `.IntLib`) as inputs.
-- Altium variants, Draftsman, OutJobs, and rules beyond what `kicad-cli pcb
+- Draftsman, OutJobs, and rules beyond what `kicad-cli pcb
   import` already maps.
 - **ASCII `.SchDoc` is in scope after all.** It carries the same records, one
   per line (`|HEADER=Protel for Windows - Schematic Capture Ascii File…`), so
@@ -111,6 +111,13 @@ rests on them.
   `.SchDoc` (flag byte ≠ 0) are counted in `not_converted`. *[builder call]*
 - Round-tripping back to Altium.
 - Editing or fixing the Altium files.
+
+**Variants (added 2026-10-24).** A `.PrjPcb`'s project variants are carried
+over. Kind=1 (not fitted) becomes DNP, out of BOM and position files; Kind=0
+(alternate part) changes Value, Description and Footprint, as KiCad's own
+importer maps them. Changes go on every symbol instance the variation's
+UniqueId path names, and on its footprint. Parameter variations are counted
+in the report, not converted.
 
 ## 5. Anti-goals: a failure even if it technically works
 

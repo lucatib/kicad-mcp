@@ -290,6 +290,42 @@ def fill_values(text: str, values: dict[str, str]) -> str:
     return text
 
 
+def add_variants(text: str, names: list[tuple[str, str]], changes: dict[str, list]) -> str:
+    """Declare the design variants and give each footprint what its variants change.
+
+    `names` holds (name, description); `changes` maps a reference to the
+    variants.KicadChange entries that apply to it.
+    """
+    if not names:
+        return text
+    edits: list[tuple[int, str]] = []
+    for fp in footprints(text):
+        wanted = changes.get(fp.ref)
+        if not wanted:
+            continue
+        lines = []
+        for c in wanted:
+            parts = [f'(variant (name "{_escape(c.variant)}")']
+            if c.dnp:
+                parts.append("(dnp yes) (exclude_from_bom yes) (exclude_from_pos_files yes)")
+            for name, value in c.fields.items():
+                parts.append(f'(field (name "{_escape(name)}") (value "{_escape(value)}"))')
+            lines.append("\t\t" + " ".join(parts) + ")")
+        # Just before the footprint's closing parenthesis.
+        close = text.rindex("\n\t)", fp.start, fp.end)
+        edits.append((close, "\n" + "\n".join(lines)))
+    for pos, chunk in sorted(edits, reverse=True):
+        text = text[:pos] + chunk + text[pos:]
+    decl = ["\t(variants"]
+    for name, description in names:
+        d = f' (description "{_escape(description)}")' if description and description != name else ""
+        decl.append(f'\t\t(variant (name "{_escape(name)}"){d})')
+    decl.append("\t)")
+    first = _FP_START.search(text)
+    at = first.start() if first else text.rindex("\n)") + 1
+    return text[:at] + "\n".join(decl) + "\n" + text[at:]
+
+
 def rename_nets(text: str, renames: dict[str, str]) -> str:
     """Rename nets everywhere they are named, whole names only."""
     if not renames:
