@@ -142,3 +142,21 @@ def test_mode_from_prjpcb(tmp_path):
     prj = tmp_path / "x.PrjPcb"
     prj.write_text("[Design]\nHierarchyMode=4\n", encoding="latin-1")
     assert dz.build_design(_sheets("eDP"), "eDP", None, prj).mode == "global"
+
+
+def test_duplicate_sheet_names_get_channel_suffix(sampler_sheets, sampler_parts):
+    # KiCad needs sibling sheet names to be unique; Altium allows eight
+    # "U_Input_channel". Designators are untouched by this.
+    d = dz.build_design(sampler_sheets, "Sampler", sampler_parts, None)
+    channels = {c.sheet_symbol.uid: c for c in d.root.children if c.sheet.stem == "Input_channel"}
+    assert channels["GBVAIBAE"].name == "U_Input_channel_A"
+    assert channels["TJKXBNXR"].name == "U_Input_channel_H"
+    assert channels["GBVAIBAE"].human_path == "/U_Input_channel_A/"
+    (adc,) = [c for c in d.root.children if c.sheet_symbol.uid == "UMAXLLEH"]
+    assert adc.name == "U_ADC_8CH" and d.root.human_path == "/"
+    assert any("U_Input_channel" in i["what"] for i in d.inferred)
+
+
+def test_flat_sheet_names_are_stems(edp_parts):
+    d = dz.build_design(_sheets("eDP"), "eDP", edp_parts, None)
+    assert [c.human_path for c in d.root.children] == ["/it6251_core/", "/power/"]

@@ -290,7 +290,7 @@ class _SheetWriter:
     def sheet_node(self, child: SheetNode, flip: sy.Flip, i: int, instances) -> sexpr.SExpr:
         sym = child.sheet_symbol
         target = (child.sheet.stem if child.sheet else Path(child.file_name).stem) + ".kicad_sch"
-        name = sym.name if sym else child.sheet.stem
+        name = child.name or (sym.name if sym else child.sheet.stem)
         if sym is not None:
             x, y = flip.pt(sym.x, sym.y)
             w, h = sy.r6(sym.width), sy.r6(sym.height)

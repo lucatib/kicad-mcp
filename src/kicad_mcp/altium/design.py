@@ -52,6 +52,9 @@ class SheetNode:
     id_path: tuple[str, ...]
     footprint_prefix: str
     children: list["SheetNode"] = field(default_factory=list)
+    #: Sheet name, unique among siblings, and the "/a/b/" path KiCad's board shows.
+    name: str = ""
+    human_path: str = "/"
 
     def walk(self):
         yield self
@@ -149,6 +152,7 @@ def build_design(sheets: list[Sheet], project_name: str,
                              "order": [s.stem for s in ordered]})
         flat = True
 
+    _name_sheets(root, inferred)
     in_design = {id(n.sheet) for n in root.walk() if n.sheet is not None}
     unreferenced = [s.stem for s in sheets if id(s) not in in_design]
     channel_format = (prj.get("CHANNELDESIGNATORFORMATSTRING") or ["$Component$ChannelAlpha"])[0]
@@ -215,6 +219,31 @@ def _expand(node: SheetNode, by_file, issues, stack: list[str]) -> None:
                                  f"{' -> '.join(stack)}.",
                                  remedy="Fix the sheet symbol loop in Altium first.")
         _expand(child, by_file, issues, stack + [key])
+
+
+def _name_sheets(node: SheetNode, inferred: list[dict]) -> None:
+    """Give children unique names: KiCad rejects two sibling sheets with one name."""
+    def base(child: SheetNode) -> str:
+        if child.sheet_symbol is not None and child.sheet_symbol.name:
+            return child.sheet_symbol.name
+        return child.sheet.stem if child.sheet is not None else Path(child.file_name).stem
+
+    groups: dict[str, list[SheetNode]] = {}
+    for child in node.children:
+        groups.setdefault(base(child), []).append(child)
+    for name, group in groups.items():
+        if len(group) == 1:
+            group[0].name = name
+            continue
+        ordered = sorted(group, key=lambda c: _order_key(c.sheet_symbol) if c.sheet_symbol else (0, 0))
+        for i, child in enumerate(ordered):
+            child.name = f"{name}_{_alpha(i)}"
+        inferred.append({"what": f"sheet names {name}_A..{name}_{_alpha(len(group) - 1)}",
+                         "reason": f"{len(group)} sibling sheets are all called {name}; "
+                                   "KiCad needs unique names (designators unchanged)"})
+    for child in node.children:
+        child.human_path = node.human_path + child.name + "/"
+        _name_sheets(child, inferred)
 
 
 def footprint_kicad_path(design: Design, id_path: tuple[str, ...]) -> str | None:

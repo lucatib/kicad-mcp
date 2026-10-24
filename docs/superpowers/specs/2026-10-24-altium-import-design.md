@@ -45,8 +45,12 @@ rests on them.
      `\GBVAIBAE\JSBUTAQD`, `\TJKXBNXR\JSBUTAQD`, and so on.
 5. **KiCad's own mapping from id to UUID is reproducible.** KiCad's PCB
    importer computes `AltiumUniqueIdToKiid(id) = uuid5(6f9619ff-8b86-d011-b42d-00cf4fc964ff, id)`,
-   where `id` is the last path segment without the backslash. Python's
-   `uuid.uuid5` reproduces it exactly (verified on 112/112 footprints).
+   where `id` is the whole `SOURCEUNIQUEID` without its leading backslash
+   (`GBVAIBAE\JSBUTAQD` for a part in a sub-sheet, so every channel instance
+   gets its own UUID). Python's `uuid.uuid5` reproduces it exactly (verified
+   on eDP's 112 and Sampler's 567 footprints). The converted schematic gives
+   each symbol `uuid5` of its own UniqueId and each sheet `uuid5` of its sheet
+   symbol's, and the board's paths are rewritten to match (fact 7).
 6. **KiCad's PCB importer breaks the sheet half of each footprint path.**
    It builds the sheet part as `KIID(SOURCEHIERARCHICALPATH)`. That is a name
    such as `power` or `Sampler\U_Input_channel`, not a UUID, so KiCad
