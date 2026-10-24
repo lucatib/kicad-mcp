@@ -111,7 +111,7 @@ def _disagreements(design: dz.Design, refs: dict, board_issues: list[dict], foot
             for part in node.sheet.parts:
                 key = (part.uid,) if design.flat else node.id_path + (part.uid,)
                 ref = refs.get((node.kicad_path, part.uid), part.designator)
-                if key in linked or ref in moved or not ref or ref.startswith("#"):
+                if key in linked or ref in moved or not ref or ref.startswith("#") or ref.endswith("?"):
                     continue
                 if part.part_count > 1 and any(
                         ((u.uid,) if design.flat else node.id_path + (u.uid,)) in linked
@@ -145,7 +145,12 @@ def _disagreements(design: dz.Design, refs: dict, board_issues: list[dict], foot
                 else (node.kicad_path, part.uid)
             owners.setdefault(ref, set()).add(owner)
     for ref, who in sorted(owners.items()):
-        if len(who) > 1:
+        if ref.endswith("?"):
+            # "R?" is Altium's (and KiCad's) mark of a part never annotated:
+            # not a duplicate, and nothing on the board can match it.
+            out.append({"kind": "not_annotated", "ref": ref, "count": len(who),
+                        "note": "run Annotate in Altium or KiCad; these parts link to nothing yet"})
+        elif len(who) > 1:
             out.append({"kind": "duplicate_reference", "ref": ref, "count": len(who)})
     return out
 

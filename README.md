@@ -558,7 +558,8 @@ What it reports:
     (`moved_sheet`);
   - parts on only one side (`board_only`, `schematic_only`);
   - different values or footprints on the two sides;
-  - duplicate designators.
+  - duplicate designators;
+  - parts never annotated (`R?`), counted as `not_annotated`, not as duplicates.
 
   These are listed, not fixed.
 - **`not_converted` and `approximations`** list what has no KiCad counterpart:

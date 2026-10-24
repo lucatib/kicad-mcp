@@ -184,3 +184,24 @@ def test_flat_schematics_only_keeps_every_sheet(install, tmp_path):
     root = (out / f"{result['project'].rsplit(chr(92), 1)[-1].rsplit('/', 1)[-1][:-10]}.kicad_sch").read_text(encoding="utf-8")
     assert root.count("(sheet\n") == 2
     assert len(list(out.glob("*.kicad_sch"))) == 3
+
+
+@pytest.mark.requires_kicad
+def test_unannotated_parts_are_reported_as_such(install, tmp_path):
+    # Altium's "R?" means annotation was never run: two of them are not a
+    # duplicate designator, and they are listed as not annotated.
+    src = tmp_path / "src"
+    src.mkdir()
+    lines = ["|HEADER=Protel for Windows - Schematic Capture Ascii File Version 5.0",
+             "|RECORD=31|FONTIDCOUNT=1|SIZE1=10|FONTNAME1=Arial"]
+    for i, (des, uid) in enumerate((("R?", "AAAAAAAA"), ("R?", "BBBBBBBB"), ("R1", "CCCCCCCC"))):
+        idx = len(lines) - 1
+        lines.append(f"|RECORD=1|LIBREFERENCE=Res|LOCATION.X={100 + 50 * i}|LOCATION.Y=100"
+                     f"|CURRENTPARTID=1|PARTCOUNT=2|UNIQUEID={uid}")
+        lines.append(f"|RECORD=34|NAME=Designator|TEXT={des}|OWNERINDEX={idx}")
+    (src / "sheet.SchDoc").write_text("\r\n".join(lines) + "\r\n", encoding="latin-1")
+    result = importer.import_altium(install, str(src))
+    assert "error" not in result, result
+    kinds = [(d["kind"], d.get("ref"), d.get("count")) for d in result["source_disagreements"]["items"]]
+    assert ("not_annotated", "R?", 2) in kinds
+    assert not any(k == "duplicate_reference" for k, _, _ in kinds)

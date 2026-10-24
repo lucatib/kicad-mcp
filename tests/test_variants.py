@@ -164,3 +164,21 @@ def test_bom_keeps_designators_that_end_in_a_letter(tmp_path):
     rows = list(csv.DictReader(io.StringIO(out.read_text(encoding="utf-8"))))
     assert [r["Refs"] for r in rows if r["Refs"].startswith("U1")] == ["U1A"]
     assert res["references_fixed"] == 1
+
+
+@pytest.mark.requires_kicad
+def test_bom_keeps_the_question_mark_of_an_unannotated_part(tmp_path):
+    # "U?" means not annotated yet, in KiCad as in Altium: it must stay visible.
+    try:
+        install = find_install()
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"KiCad not installed: {exc}")
+    sch = _project(tmp_path)
+    text = sch.read_text(encoding="utf-8")
+    sch.write_text(text.replace('(reference "U1")', '(reference "U?")', 1)
+                   .replace('(property "Reference" "U1"', '(property "Reference" "U?"', 1), encoding="utf-8")
+    out = tmp_path / "b.csv"
+    res = cli.export_bom(install, sch, out)
+    rows = list(csv.DictReader(io.StringIO(out.read_text(encoding="utf-8"))))
+    assert [r["Refs"] for r in rows if r["Refs"].startswith("U")] == ["U?"]
+    assert res["references_fixed"] == 0
