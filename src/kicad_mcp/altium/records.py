@@ -159,8 +159,8 @@ def read_schdoc_records(path: str | Path) -> tuple[Record, list[Record], int]:
     return recs[0], recs[1:], binary
 
 
-def read_storage_images(path: str | Path) -> list[bytes]:
-    """Images embedded in a binary .SchDoc's `Storage` stream, in file order.
+def read_storage_images(path: str | Path) -> list[tuple[str, bytes]]:
+    """(original file name, data) of images embedded in a .SchDoc's `Storage` stream.
 
     The stream is one header record, then per image a framed record whose
     body is a 1-byte name length, the original file name, a 4-byte data
@@ -178,7 +178,7 @@ def read_storage_images(path: str | Path) -> list[bytes]:
         data = ole.openstream("Storage").read()
     finally:
         ole.close()
-    out: list[bytes] = []
+    out: list[tuple[str, bytes]] = []
     i = 0
     first = True
     while i + 4 <= len(data):
@@ -190,11 +190,12 @@ def read_storage_images(path: str | Path) -> list[bytes]:
             continue
         try:
             n = body[1]
+            name = body[2:2 + n].decode("latin-1")
             j = 2 + n
             size = int.from_bytes(body[j:j + 4], "little")
-            out.append(zlib.decompress(body[j + 4:j + 4 + size]))
+            out.append((name, zlib.decompress(body[j + 4:j + 4 + size])))
         except (IndexError, zlib.error):
-            out.append(b"")
+            out.append(("", b""))
     return out
 
 

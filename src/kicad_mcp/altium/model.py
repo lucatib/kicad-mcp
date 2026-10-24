@@ -185,7 +185,7 @@ class Sheet:
     no_ercs: list[tuple[float, float]] = field(default_factory=list)
     sheet_symbols: list[SheetSymbol] = field(default_factory=list)
     graphics: list[Graphic] = field(default_factory=list)
-    images: list[bytes] = field(default_factory=list)
+    images: list[tuple[str, bytes]] = field(default_factory=list)
     unsupported: Counter = field(default_factory=Counter)
     binary_records: int = 0
 
