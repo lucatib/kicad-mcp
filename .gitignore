@@ -11,3 +11,4 @@ build/
 *.erc.rpt
 *.bom.csv
 .codex/
+tests/.altium_cache/
