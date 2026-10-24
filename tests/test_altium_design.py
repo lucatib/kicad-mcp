@@ -171,3 +171,39 @@ def test_other_units_take_the_linked_units_reference(sampler_sheets, sampler_par
     board_refs = {ch.id_path + (linked.uid,): "RN1Q"}
     refs = dz.instance_references(d, board_refs)
     assert {refs[(ch.kicad_path, p.uid)] for p in rn1} == {"RN1Q"}
+
+
+def test_sheet_file_name_without_extension_resolves(tmp_path):
+    # Altium may store FILE_NAME without ".SchDoc" (KiCad's issue22943 sample).
+    cover = model.load_sheet(altium_fixture("qa/issue22943/1_cover.SchDoc"))
+    child = tmp_path / "2_cubesat_bus.SchDoc"
+    shutil.copy(altium_fixture("eDP/power.SchDoc"), child)
+    d = dz.build_design([cover, model.load_sheet(child)], "cover", None, None)
+    assert d.root.sheet.stem == "1_cover"
+    (bus,) = [c for c in d.root.children if c.sheet_symbol.uid == "MQALSEGY"]
+    assert bus.sheet is not None and bus.sheet.stem == "2_cubesat_bus"
+
+
+def test_shared_or_missing_unique_ids_keep_their_designators(tmp_path):
+    f = tmp_path / "dup.SchDoc"
+    lines = ["|HEADER=Protel for Windows - Schematic Capture Ascii File Version 5.0",
+             "|RECORD=31|FONTIDCOUNT=1|SIZE1=10|FONTNAME1=Arial"]
+    for i, (des, uid) in enumerate((("R1", "AAAAAAAA"), ("R2", "AAAAAAAA"), ("R3", ""), ("R4", ""))):
+        idx = len(lines) - 1
+        lines.append(f"|RECORD=1|LIBREFERENCE=Res|LOCATION.X={100 + 50 * i}|LOCATION.Y=100"
+                     f"|CURRENTPARTID=1|PARTCOUNT=2" + (f"|UNIQUEID={uid}" if uid else ""))
+        lines.append(f"|RECORD=34|NAME=Designator|TEXT={des}|OWNERINDEX={idx}")
+    f.write_text("\r\n".join(lines) + "\r\n", encoding="latin-1")
+    sheet = model.load_sheet(f)
+    assert len({p.uid for p in sheet.parts}) == 4
+    assert sorted(sheet.id_problems) == ["R1", "R2", "R3", "R4"]
+    d = dz.build_design([sheet], "dup", None, None)
+    refs = dz.instance_references(d, {})
+    assert sorted(refs.values()) == ["R1", "R2", "R3", "R4"]
+
+
+def test_sheet_named_like_the_project_gets_its_own_file(edp_parts):
+    sheets = _sheets("eDP")
+    d = dz.build_design(sheets, "power", edp_parts, None)
+    names = {dz.sheet_file_name(d, n) for n in d.nodes()} | {dz.sheet_file_name(d, d.root)}
+    assert len(names) == 3 and "power.kicad_sch" in names and "power_sheet.kicad_sch" in names

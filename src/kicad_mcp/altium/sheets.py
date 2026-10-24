@@ -20,7 +20,7 @@ from pathlib import Path
 from .. import sexpr
 from ..sexpr import Sym, make
 from . import symbols as sy
-from .design import KICAD_ALTIUM_NS, Design, SheetNode, altium_kiid
+from .design import KICAD_ALTIUM_NS, Design, SheetNode, altium_kiid, sheet_file_name
 from .model import Part, Sheet, location, vertices
 
 #: Altium port/sheet-entry IOTYPE -> KiCad label shape.
@@ -31,25 +31,7 @@ def _uid(*parts: object) -> str:
     return str(uuid.uuid5(KICAD_ALTIUM_NS, ":".join(str(p) for p in parts)))
 
 
-def overbar(text: str) -> str:
-    """Altium marks an overbar with a backslash after each letter (R\\E\\S\\E\\T\\)."""
-    if "\\" not in text:
-        return text
-    out, run = [], []
-    i = 0
-    while i < len(text):
-        if i + 1 < len(text) and text[i + 1] == "\\":
-            run.append(text[i])
-            i += 2
-            continue
-        if run:
-            out.append("~{" + "".join(run) + "}")
-            run = []
-        out.append(text[i])
-        i += 1
-    if run:
-        out.append("~{" + "".join(run) + "}")
-    return "".join(out)
+overbar = sy.overbar
 
 
 def _stroke0():
@@ -314,11 +296,6 @@ class _SheetWriter:
             if node.sheet is not None:
                 self.uses[id(node.sheet)].append(node)
 
-    def file_name(self, sheet: Sheet | None) -> str:
-        if sheet is None or (self.d.root.sheet is sheet):
-            return self.d.project_name + ".kicad_sch"
-        return sheet.stem + ".kicad_sch"
-
     def write_all(self, out_dir: Path) -> list[str]:
         self.plan()
         files = []
@@ -328,7 +305,7 @@ class _SheetWriter:
                 continue
             if node.sheet is not None:
                 written.add(id(node.sheet))
-            path = out_dir / self.file_name(node.sheet)
+            path = out_dir / sheet_file_name(self.d, node)
             path.write_text(sexpr.dumps(self.sheet_doc(node)), encoding="utf-8")
             files.append(str(path))
         return files
@@ -369,7 +346,7 @@ class _SheetWriter:
 
     def sheet_node(self, child: SheetNode, flip: sy.Flip, i: int, instances) -> sexpr.SExpr:
         sym = child.sheet_symbol
-        target = (child.sheet.stem if child.sheet else Path(child.file_name).stem) + ".kicad_sch"
+        target = sheet_file_name(self.d, child)
         name = child.name or (sym.name if sym else child.sheet.stem)
         if sym is not None:
             x, y = flip.pt(sym.x, sym.y)
@@ -416,7 +393,6 @@ class _SheetWriter:
             groups[key].append(part)
         lib_by_key: dict[str, str] = {}
         used_names: set[str] = set()
-        seen_uids: set[str] = set()
         placed = []
         for units in groups.values():
             units = sorted(units, key=lambda u: u.part_id)
@@ -431,13 +407,8 @@ class _SheetWriter:
                 lib_by_key[key] = candidate
                 libs.append(sy.lib_symbol(candidate, units, sheet.fonts, notes))
             for u in units:
-                if u.uid and u.uid not in seen_uids:
-                    seen_uids.add(u.uid)
-                    sid = altium_kiid(u.uid)
-                else:
-                    sid = _uid("part", stem, u.rec.index)
-                    self.issues.append({"kind": "missing_or_duplicate_unique_id", "sheet": stem,
-                                        "designator": u.designator})
+                # Local ids ("~n") stand in for missing or shared UniqueIds.
+                sid = _uid("part", stem, u.uid) if u.uid.startswith("~") else altium_kiid(u.uid)
                 instances = [(self.d.project_name, n.kicad_path, self.refs.get((n.kicad_path, u.uid), u.designator))
                              for n in nodes]
                 fp = next((self.fp[r] for _, _, r in instances if r in self.fp), "")
@@ -517,14 +488,18 @@ class _SheetWriter:
                 doc += self.image(g, flip, images, stem)
                 continue
             g = _special_strings(g, sheet)
-            for item in sy.graphic_nodes(g, 0.0, 0.0, sheet.fonts, notes, yflip=flip.y):
+            for k, item in enumerate(sy.graphic_nodes(g, 0.0, 0.0, sheet.fonts, notes, yflip=flip.y)):
                 if item[0] == Sym("text") or item[0] == Sym("text_box"):
                     item.insert(2, make("exclude_from_sim", False))
-                item.append(make("uuid", _uid("graphic", stem, g.rec.index, len(item))))
+                item.append(make("uuid", _uid("graphic", stem, g.rec.index, k)))
                 doc.append(item)
         if sheet.title_block_on:
             doc += title_block(sheet, flip)
 
+        for designator in sheet.id_problems:
+            self.issues.append({"kind": "missing_or_duplicate_unique_id", "sheet": stem,
+                                "designator": designator,
+                                "note": "designator kept; links to the board by reference only"})
         for n in notes:
             self.notes[n] += 1
         for kind, count in sheet.unsupported.items():

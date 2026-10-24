@@ -200,8 +200,8 @@ def graphic_nodes(g: Graphic, dx: float, dy: float, fonts, notes: list[str],
         border = rec.bool("SHOWBORDER") or k == "note"
         bstroke = make("stroke", make("width", 0 if border else -1),
                        make("type", Sym("solid" if border else "default")))
-        alignment = rec.int("ALIGNMENT", 1)  # 1 left, 2 right, 3 centre in Altium
-        just = {1: 6, 2: 8, 3: 7}.get(alignment, 6)
+        alignment = rec.int("ALIGNMENT", 1)  # 1 left, 2 centre, 3 right in Altium
+        just = {1: 6, 2: 7, 3: 8}.get(alignment, 6)
         text = rec.text("TEXT").replace("~1", "\n")
         return [make("text_box", text, make("at", left, top, 0), make("size", r6(right - left), size_y),
                      make("margins", margin, margin, margin, margin), bstroke, fill(rec),
@@ -210,6 +210,27 @@ def graphic_nodes(g: Graphic, dx: float, dy: float, fonts, notes: list[str],
         notes.append("image inside a symbol not converted")
         return []
     return []
+
+
+def overbar(text: str) -> str:
+    """Altium marks an overbar with a backslash after each letter (R\\E\\S\\E\\T\\)."""
+    if "\\" not in text:
+        return text
+    out, run = [], []
+    i = 0
+    while i < len(text):
+        if i + 1 < len(text) and text[i + 1] == "\\":
+            run.append(text[i])
+            i += 2
+            continue
+        if run:
+            out.append("~{" + "".join(run) + "}")
+            run = []
+        out.append(text[i])
+        i += 1
+    if run:
+        out.append("~{" + "".join(run) + "}")
+    return "".join(out)
 
 
 def pin_endpoint(pin: Pin) -> tuple[float, float]:
@@ -255,7 +276,7 @@ def pin_node(pin: Pin, ax: float, ay: float) -> sexpr.SExpr:
                 make("length", r6(pin.length)))
     if pin.hidden:
         node.append(make("hide", True))
-    node.append(make("name", name.replace("\\", ""), effects({}, 0, size=DEFAULT_TEXT)))
+    node.append(make("name", overbar(name), effects({}, 0, size=DEFAULT_TEXT)))
     node.append(make("number", pin.number, effects({}, 0, size=DEFAULT_TEXT)))
     return node
 

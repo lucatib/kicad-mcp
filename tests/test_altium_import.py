@@ -146,3 +146,15 @@ def test_sampler_end_to_end(install, tmp_path):
     report = json.loads((out / "import_report.json").read_text(encoding="utf-8"))
     assert report["parity"]["missing"] == 0 and report["parity"]["extra"] == 0
     assert report["parity"]["duplicates"] == 0
+
+
+@pytest.mark.requires_kicad
+def test_flat_schematics_only_keeps_every_sheet(install, tmp_path):
+    # The default project name is a sheet's stem; the root must not overwrite it.
+    src = _copy("eDP", tmp_path, {"it6251_core.SchDoc", "power.SchDoc"})
+    result = importer.import_altium(install, str(src))
+    assert "error" not in result, result
+    out = importer.Path(result["output_dir"])
+    root = (out / f"{result['project'].rsplit(chr(92), 1)[-1].rsplit('/', 1)[-1][:-10]}.kicad_sch").read_text(encoding="utf-8")
+    assert root.count("(sheet\n") == 2
+    assert len(list(out.glob("*.kicad_sch"))) == 3

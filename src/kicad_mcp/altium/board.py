@@ -20,7 +20,7 @@ from pathlib import Path
 
 from .. import cli
 from ..errors import CliError
-from .design import Design, altium_kiid, footprint_kicad_path
+from .design import Design, altium_kiid, footprint_kicad_path, sheet_file_name
 from .pcbdoc import BoardPart
 
 #: Footprints KiCad's importer moved by the board offset still sit this close
@@ -184,7 +184,7 @@ def rewrite_board(text: str, joins: list[tuple[Footprint, BoardPart | None]],
                            "id": "\\" + "\\".join(part.id_path), "board_sheet": part.sheet_path})
             continue
         node, _ = found
-        sheetfile = (design.project_name if node is design.root else node.sheet.stem) + ".kicad_sch"
+        sheetfile = sheet_file_name(design, node)
         block = text[fp.start:fp.end]
         block = _PATH.sub(lambda m: f'\t\t(path "{new_path}")', block, count=1)
         block = re.sub(r'^\t\t\(sheetname "(?:[^"\\]|\\.)*"\)', lambda m: f'\t\t(sheetname "{_escape(node.human_path)}")',

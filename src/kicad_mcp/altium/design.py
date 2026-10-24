@@ -93,7 +93,9 @@ def _prjpcb(path: Path | None) -> dict[str, list[str]]:
 
 
 def _key(name: str) -> str:
-    return Path(name.replace("\\", "/")).name.lower()
+    """Case-insensitive file key; Altium may leave ".SchDoc" off a sheet symbol's file name."""
+    p = Path(name.replace("\\", "/"))
+    return (p.name if p.suffix else p.name + ".schdoc").lower()
 
 
 def _order_key(node_symbol: SheetSymbol) -> tuple[float, float]:
@@ -244,6 +246,16 @@ def _name_sheets(node: SheetNode, inferred: list[dict]) -> None:
     for child in node.children:
         child.human_path = node.human_path + child.name + "/"
         _name_sheets(child, inferred)
+
+
+def sheet_file_name(design: "Design", node: SheetNode) -> str:
+    """The .kicad_sch a node is written to; a sheet named like the project steps aside."""
+    if node is design.root:
+        return design.project_name + ".kicad_sch"
+    stem = node.sheet.stem if node.sheet is not None else Path(node.file_name.replace("\\", "/")).stem
+    if stem.lower() == design.project_name.lower():
+        stem += "_sheet"
+    return stem + ".kicad_sch"
 
 
 def footprint_kicad_path(design: Design, id_path: tuple[str, ...]) -> str | None:

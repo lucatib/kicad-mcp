@@ -141,3 +141,22 @@ def test_unresolved_comment_takes_board_value(tmp_path):
 
     assert value("") == ""
     assert value(None) == part.libref
+
+
+@pytest.mark.parametrize("alignment,justify", [(1, ["left", "top"]), (2, ["top"]), (3, ["right", "top"])])
+def test_text_frame_alignment(alignment, justify):
+    from kicad_mcp.altium.model import Graphic
+    from kicad_mcp.altium.records import Record
+    rec = Record.from_text(f"|RECORD=28|LOCATION.X=10|LOCATION.Y=10|CORNER.X=50|CORNER.Y=30"
+                           f"|TEXT=note|ALIGNMENT={alignment}|FONTID=1")
+    (node,) = symbols.graphic_nodes(Graphic("textframe", rec), 0, 0, {}, [], yflip=lambda y: 100 - y)
+    got = sexpr.child(sexpr.child(node, "effects"), "justify")
+    assert [s.name for s in got[1:]] == justify
+
+
+def test_pin_name_keeps_overbar():
+    from kicad_mcp.altium.records import Record
+    pin = _pin(0)
+    pin.name = "".join(c + "\\" for c in "RESET")
+    node = symbols.pin_node(pin, 0, 0)
+    assert sexpr.child(node, "name")[1] == "~{RESET}"

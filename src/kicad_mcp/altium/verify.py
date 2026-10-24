@@ -154,6 +154,8 @@ def parity(install, pcb: Path, known_refs: set[str], output: Path | None = None,
     import shutil  # noqa: PLC0415
 
     out = output or pcb.with_suffix(".parity.json")
+    out.unlink(missing_ok=True)  # a report left by an earlier run must not pass for this one
+    result: dict = {}
     with tempfile.TemporaryDirectory(prefix="kicad-mcp-") as tmp:
         for f in pcb.parent.iterdir():
             if f.suffix in (".kicad_sch", ".kicad_pcb", ".kicad_pro", ".kicad_wks"):
@@ -163,13 +165,17 @@ def parity(install, pcb: Path, known_refs: set[str], output: Path | None = None,
         data.setdefault("board", {}).setdefault("design_settings", {})["rule_severities"] = {
             k: "ignore" for k in PHYSICAL_CHECKS}
         pro.write_text(json.dumps(data), encoding="utf-8")
-        cli.run_cli(install, ["pcb", "drc", "--schematic-parity", "--format", "json", "--severity-all",
-                              "-o", str(out), str(Path(tmp) / pcb.name)], timeout=timeout)
+        result = cli.run_cli(install, ["pcb", "drc", "--schematic-parity", "--format", "json",
+                                       "--severity-all", "-o", str(out), str(Path(tmp) / pcb.name)],
+                             timeout=timeout)
     try:
         report = json.loads(out.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {"error": "kicad-cli wrote no DRC report", "missing": None, "extra": None,
-                "duplicates": None, "other": {}, "unexplained": []}
+        # No verdict is not a clean verdict: it must keep `aligned` false.
+        why = (result.get("stderr") or result.get("stdout") or "no report").strip()[-500:]
+        return {"error": f"kicad-cli wrote no DRC report: {why}", "missing": None, "extra": None,
+                "duplicates": None, "other": {},
+                "unexplained": [{"type": "parity_not_run", "description": why, "refs": []}]}
     summary = summarize_parity(report, known_refs)
     summary["unconnected"] = len(report.get("unconnected_items", []))
     summary["report_file"] = str(out)

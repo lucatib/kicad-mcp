@@ -56,9 +56,8 @@ def _default_name(sheet_list: list[model.Sheet], board: Path | None, prj: Path |
         return prj.stem
     if board is not None:
         return board.stem
-    referenced = {Path(s.file_name.replace("\\", "/")).name.lower()
-                  for sh in sheet_list for s in sh.sheet_symbols}
-    roots = sorted(s.stem for s in sheet_list if s.path.name.lower() not in referenced)
+    referenced = {dz._key(s.file_name) for sh in sheet_list for s in sh.sheet_symbols}
+    roots = sorted(s.stem for s in sheet_list if dz._key(s.path.name) not in referenced)
     return (roots or sorted(s.stem for s in sheet_list))[0]
 
 
@@ -224,6 +223,7 @@ def import_altium(install, sources, output_dir: str | None = None, project_name:
     issues = design.issues + written["issues"]
     if board_file and sheet_list:
         aligned = (not net_check["topology_differences"] and not parity["unexplained"]
+                   and not parity.get("error")
                    and not any(i["kind"] in ("repeat_channel", "missing_sheet") for i in issues))
     else:
         aligned = None  # nothing to align with only one side

@@ -87,3 +87,14 @@ def test_single_pad_nets_matched_for_renaming():
     out = verify.compare_nets(board, sch, set())
     assert out["matched"] == {"EEM1_5_P": "/U_LVDS_EEM1/EEM1_5_P", "N": "/N"}
     assert out["topology_differences"] == []
+
+
+def test_parity_without_a_report_is_an_error(monkeypatch, tmp_path):
+    from kicad_mcp import cli
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text("(kicad_pcb)", encoding="utf-8")
+    stale = tmp_path / "parity.json"
+    stale.write_text('{"schematic_parity": []}', encoding="utf-8")
+    monkeypatch.setattr(cli, "run_cli", lambda *a, **k: {"returncode": 1, "stdout": "", "stderr": "boom"})
+    out = verify.parity(None, pcb, set(), output=stale)
+    assert out.get("error") and out["unexplained"]

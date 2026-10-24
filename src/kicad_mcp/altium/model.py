@@ -195,6 +195,8 @@ class Sheet:
     images: list[tuple[str, bytes]] = field(default_factory=list)
     unsupported: Counter = field(default_factory=Counter)
     binary_records: int = 0
+    #: Designators of parts whose UniqueId was missing or shared.
+    id_problems: list[str] = field(default_factory=list)
 
 
 def location(rec: Record, prefix: str = "LOCATION") -> tuple[float, float]:
@@ -364,6 +366,14 @@ def load_sheet(path: str | Path) -> Sheet:
             sheet.unsupported[f"RECORD_{t}"] += 1
 
     sheet.parts = list(parts.values())
+    # A part's UniqueId is its identity everywhere downstream. One that is
+    # missing, or shared with another part, cannot link to the board; give it
+    # a local id so its designator stays its own, and report it.
+    seen = Counter(part.uid for part in sheet.parts if part.uid)
+    for part in sheet.parts:
+        if not part.uid or seen[part.uid] > 1:
+            sheet.id_problems.append(part.designator)
+            part.uid = f"~{part.rec.index}"
     sheet.sheet_symbols = list(symbols.values())
     sheet.images = read_storage_images(p)
     return sheet

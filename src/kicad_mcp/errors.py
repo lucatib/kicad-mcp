@@ -28,12 +28,12 @@ class KicadMcpError(Exception):
 class KicadNotFoundError(KicadMcpError):
     remedy = (
         "Install KiCad 10, or set KICAD_MCP_KICAD_ROOT to the install directory "
-        r"(the one containing bin\kicad-cli.exe)."
+        "(the one containing bin/kicad-cli; on macOS, KiCad.app)."
     )
 
 
 class UnsupportedPlatformError(KicadMcpError):
-    remedy = "This server currently supports Windows only."
+    remedy = "This server supports Windows, Linux and macOS."
 
 
 class NotConnectedError(KicadMcpError):
