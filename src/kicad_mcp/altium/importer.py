@@ -11,6 +11,7 @@ always written; what the Altium files disagree on is reported, never fixed.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 from .. import cli
@@ -145,8 +146,22 @@ def _disagreements(design: dz.Design, refs: dict, board_issues: list[dict], foot
     return out
 
 
-def import_altium(install, sources, output_dir: str | None = None, project_name: str | None = None,
-                  overwrite: bool = False) -> dict:
+@dataclass(frozen=True)
+class Inputs:
+    """Sources read and the output folder approved, before kicad-cli is needed."""
+
+    sch_files: list[Path]
+    board_file: Path | None
+    prj: Path | None
+    sheet_list: list[model.Sheet]
+    name: str
+    out: Path
+
+
+def check_inputs(sources, output_dir: str | None = None, project_name: str | None = None,
+                 overwrite: bool = False) -> Inputs:
+    """Everything that can refuse the import without KiCad, so a bad call says
+    what is wrong with it even where KiCad is not installed."""
     sch_files, board_file, prj = _gather(sources)
     sheet_list = []
     for f in sch_files:
@@ -163,6 +178,17 @@ def import_altium(install, sources, output_dir: str | None = None, project_name:
     if out.exists() and any(out.iterdir()) and not overwrite:
         raise ToolInputError(f"{out} already exists and is not empty.",
                              remedy="Pass another output_dir, or overwrite=True to write over it.")
+    return Inputs(sch_files, board_file, prj, sheet_list, name, out)
+
+
+def import_altium(install, sources, output_dir: str | None = None, project_name: str | None = None,
+                  overwrite: bool = False) -> dict:
+    return convert(install, check_inputs(sources, output_dir, project_name, overwrite))
+
+
+def convert(install, inputs: Inputs) -> dict:
+    sch_files, board_file, prj = inputs.sch_files, inputs.board_file, inputs.prj
+    sheet_list, name, out = inputs.sheet_list, inputs.name, inputs.out
     out.mkdir(parents=True, exist_ok=True)
 
     board_parts = pcbdoc.read_board_parts(board_file) if board_file else None

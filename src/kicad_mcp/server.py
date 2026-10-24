@@ -20,7 +20,7 @@ from typing import Any
 from mcp.server.mcpserver import Image, MCPServer
 
 from . import cli as kcli
-from .altium.importer import import_altium as _import_altium
+from .altium import importer as _altium_importer
 from . import hierarchy, pcb_common, pcb_file, pcb_live, units
 from .discovery import find_install, find_installs
 from .editor import SchematicEditor, add_decoupling_capacitors as _add_decoupling_capacitors
@@ -459,8 +459,11 @@ def import_altium(sources: list[str] | str, output_dir: str | None = None,
     sources), which must be empty unless `overwrite`. The full report is
     `import_report.json` there; the result caps each list at 50 entries.
     """
-    return _import_altium(install(), sources, output_dir=output_dir,
-                          project_name=project_name, overwrite=overwrite)
+    # The inputs are checked first: a bad call is refused for what is wrong
+    # with it, not for a KiCad install it never got far enough to need.
+    inputs = _altium_importer.check_inputs(sources, output_dir=output_dir,
+                                           project_name=project_name, overwrite=overwrite)
+    return _altium_importer.convert(install(), inputs)
 
 
 # --- symbol libraries ----------------------------------------------------

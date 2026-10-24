@@ -17,6 +17,7 @@ from altium_fixtures import altium_fixture, altium_set
 from kicad_mcp import server
 from kicad_mcp.altium import importer
 from kicad_mcp.discovery import find_install
+from kicad_mcp.errors import KicadNotFoundError
 
 
 def _copy(prefix, tmp_path, names=None):
@@ -32,27 +33,45 @@ def _hashes(folder):
     return {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in folder.iterdir() if p.is_file()}
 
 
-def test_no_altium_files_refused(tmp_path):
+@pytest.fixture
+def no_kicad(monkeypatch):
+    """Input refusals must not depend on KiCad being installed."""
+    def missing():
+        raise KicadNotFoundError("No KiCad installation found.")
+    monkeypatch.setattr(server, "install", missing)
+
+
+def test_no_altium_files_refused(tmp_path, no_kicad):
     (tmp_path / "readme.txt").write_text("x", encoding="utf-8")
     out = server.import_altium(str(tmp_path))
-    assert "error" in out and "remedy" in out
+    assert out["error"] == "ToolInputError" and "remedy" in out
 
 
-def test_two_boards_refused(tmp_path):
+def test_two_boards_refused(tmp_path, no_kicad):
     for name in ("a.PcbDoc", "b.PcbDoc", "s.SchDoc"):
         (tmp_path / name).write_bytes(b"x")
     out = server.import_altium(str(tmp_path))
-    assert "error" in out and "a.PcbDoc" in out["message"] and "b.PcbDoc" in out["message"]
+    assert out["error"] == "ToolInputError"
+    assert "a.PcbDoc" in out["message"] and "b.PcbDoc" in out["message"]
 
 
-def test_existing_output_refused(tmp_path):
+def test_existing_output_refused(tmp_path, no_kicad):
     src = _copy("eDP", tmp_path)
     dest = tmp_path / "out"
     dest.mkdir()
     (dest / "keep.txt").write_text("mine", encoding="utf-8")
     out = server.import_altium(str(src), output_dir=str(dest))
-    assert "error" in out and "overwrite" in out["remedy"]
+    assert out["error"] == "ToolInputError" and "overwrite" in out["remedy"]
     assert [p.name for p in dest.iterdir()] == ["keep.txt"]
+
+
+def test_valid_inputs_then_need_kicad(tmp_path, no_kicad):
+    # Past the checks, a missing KiCad is reported -- and nothing is written.
+    src = _copy("eDP", tmp_path)
+    dest = tmp_path / "out"
+    out = server.import_altium(str(src), output_dir=str(dest))
+    assert out["error"] == "KicadNotFoundError"
+    assert not dest.exists()
 
 
 def test_server_tool_registered():
