@@ -5,8 +5,12 @@ open in KiCad, file-based access to schematics, symbol library search, schematic
 generation from a firmware pinout, and a scripting escape hatch for everything
 else.
 
-Verified against KiCad **10.0.6**, API **10.0.1**, `kicad-python` **0.7.1**,
-`mcp` **2.0.0**.
+Verified against:
+
+| KiCad | IPC API | `kicad-python` | `mcp` |
+|---|---|---|---|
+| **10.0.7** (latest) | 10.0.6 | 0.8.0 | 2.3.0 |
+| 10.0.6 | 10.0.1 | 0.7.1 | 2.0.0 |
 
 ## Why a venv built from KiCad's own Python
 
