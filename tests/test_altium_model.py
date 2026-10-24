@@ -104,3 +104,11 @@ def test_title_block(power):
 def test_ascii_ticket1303_loads():
     sheet = model.load_sheet(altium_fixture("qa/ticket1303/overview.SchDoc"))
     assert len(sheet.sheet_symbols) == 1
+
+
+def test_page_is_altiums_own_size(power):
+    # Altium's "A" is 9.5 x 7.5 in, not KiCad's 11 x 8.5 in "A": the page keeps
+    # Altium's size so the content sits where Altium drew it.
+    assert power.paper == "User"
+    assert (power.width_mm, power.height_mm) == pytest.approx((950 * 0.254, 750 * 0.254))
+    assert power.title_block_on and power.border_on and power.style_name == "A"

@@ -12,7 +12,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .records import Record, read_schdoc_records, read_storage_images
+from .records import UNIT_MM, Record, read_schdoc_records, read_storage_images
 
 # Record types (Altium's numbering).
 COMPONENT, PIN, IEEE_SYMBOL, LABEL, BEZIER, POLYLINE, POLYGON, ELLIPSE = 1, 2, 3, 4, 5, 6, 7, 8
@@ -40,14 +40,16 @@ UNSUPPORTED = {
 _BOOKKEEPING = {SHEET, SHEET_NAME, FILE_NAME, DESIGNATOR, PARAMETER, TEMPLATE,
                 IMPLEMENTATION_LIST, IMPLEMENTATION, MAP_DEFINER_LIST, MAP_DEFINER, IMPL_PARAMS}
 
-#: Altium SHEETSTYLE -> (KiCad paper name, width mm, height mm), landscape.
-PAPER = {
-    0: ("A4", 297, 210), 1: ("A3", 420, 297), 2: ("A2", 594, 420), 3: ("A1", 841, 594),
-    4: ("A0", 1189, 841), 5: ("A", 279.4, 215.9), 6: ("B", 431.8, 279.4),
-    7: ("C", 558.8, 431.8), 8: ("D", 863.6, 558.8), 9: ("E", 1117.6, 863.6),
-    10: ("USLetter", 279.4, 215.9), 11: ("USLegal", 355.6, 215.9), 12: ("A3", 420, 297),
-    13: ("A", 279.4, 215.9), 14: ("B", 431.8, 279.4), 15: ("C", 558.8, 431.8),
-    16: ("D", 863.6, 558.8), 17: ("E", 1117.6, 863.6),
+#: Altium SHEETSTYLE -> (name, width, height) in Altium units (10 mil), landscape.
+#: Altium's sheets are not the ISO/ANSI papers of the same name ("A" is
+#: 9.5 x 7.5 in), so the page keeps Altium's size.
+SHEET_SIZES = {
+    0: ("A4", 1150, 760), 1: ("A3", 1550, 1110), 2: ("A2", 2230, 1570), 3: ("A1", 3150, 2230),
+    4: ("A0", 4460, 3150), 5: ("A", 950, 750), 6: ("B", 1500, 950), 7: ("C", 2000, 1500),
+    8: ("D", 3200, 2000), 9: ("E", 4200, 3200), 10: ("Letter", 1100, 850),
+    11: ("Legal", 1400, 850), 12: ("Tabloid", 1700, 1100), 13: ("OrCAD A", 990, 790),
+    14: ("OrCAD B", 1540, 990), 15: ("OrCAD C", 2060, 1560), 16: ("OrCAD D", 3260, 2060),
+    17: ("OrCAD E", 4280, 3280),
 }
 
 TITLE_FIELDS = ("Title", "Revision", "Date", "DocumentNumber", "CompanyName",
@@ -174,6 +176,11 @@ class Sheet:
     height_mm: float
     portrait: bool
     title: dict[str, str]
+    #: Every sheet-level parameter, for Altium's "=Name" special strings.
+    params: dict[str, str] = field(default_factory=dict)
+    style_name: str = "A4"
+    title_block_on: bool = False
+    border_on: bool = True
     parts: list[Part] = field(default_factory=list)
     wires: list[list[tuple[float, float]]] = field(default_factory=list)
     buses: list[list[tuple[float, float]]] = field(default_factory=list)
@@ -211,17 +218,17 @@ def _fonts(sheet_rec: Record | None) -> dict[int, Font]:
     return fonts or {1: Font(10)}
 
 
-def _paper(sheet_rec: Record | None) -> tuple[str, float, float, bool]:
+def _paper(sheet_rec: Record | None) -> tuple[str, float, float, bool, str]:
+    """(KiCad paper, width mm, height mm, portrait, Altium style name)."""
     if sheet_rec is None:
-        return "A4", 297.0, 210.0, False
-    portrait = sheet_rec.int("WORKSPACEORIENTATION") == 1
+        return "User", 1150 * UNIT_MM, 760 * UNIT_MM, False, "A4"
     if sheet_rec.bool("USECUSTOMSHEET"):
-        w, h = sheet_rec.mm("CUSTOMX"), sheet_rec.mm("CUSTOMY")
-        return "User", w, h, False
-    name, w, h = PAPER.get(sheet_rec.int("SHEETSTYLE"), PAPER[0])
+        return "User", sheet_rec.mm("CUSTOMX"), sheet_rec.mm("CUSTOMY"), False, "Custom"
+    portrait = sheet_rec.int("WORKSPACEORIENTATION") == 1
+    name, w, h = SHEET_SIZES.get(sheet_rec.int("SHEETSTYLE"), SHEET_SIZES[0])
     if portrait:
         w, h = h, w
-    return name, float(w), float(h), portrait
+    return "User", w * UNIT_MM, h * UNIT_MM, portrait, name
 
 
 def _param(rec: Record) -> Param:
@@ -246,9 +253,12 @@ def load_sheet(path: str | Path) -> Sheet:
     p = Path(path)
     _header, recs, binary = read_schdoc_records(p)
     sheet_rec = next((r for r in recs if r.type == SHEET), None)
-    paper, w, h, portrait = _paper(sheet_rec)
+    paper, w, h, portrait, style = _paper(sheet_rec)
     sheet = Sheet(path=p, stem=p.stem, fonts=_fonts(sheet_rec), paper=paper, width_mm=w,
-                  height_mm=h, portrait=portrait, title={}, binary_records=binary)
+                  height_mm=h, portrait=portrait, title={}, binary_records=binary,
+                  style_name=style,
+                  title_block_on=sheet_rec is not None and sheet_rec.bool("TITLEBLOCKON"),
+                  border_on=sheet_rec is None or sheet_rec.bool("BORDERON"))
     by_index = {r.index: r for r in recs}
 
     parts: dict[int, Part] = {}
@@ -295,6 +305,8 @@ def load_sheet(path: str | Path) -> Sheet:
                 part.params[r.text("NAME")] = _param(r)
             elif r.owner is None or r.owner in templates:
                 name = r.text("NAME")
+                if name and r.text("TEXT") not in ("", "*"):
+                    sheet.params[name] = r.text("TEXT")
                 for title_name in TITLE_FIELDS:
                     if name.lower() == title_name.lower() and r.text("TEXT") not in ("", "*"):
                         sheet.title[title_name] = r.text("TEXT")

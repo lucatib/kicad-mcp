@@ -73,6 +73,7 @@ def _project_file(path: Path, design: dz.Design) -> None:
     sheets_list = [[n.kicad_uuid, n.name or (n.sheet.stem if n.sheet else "")]
                    for n in design.root.walk() if n is not design.root]
     data = {"meta": {"filename": path.name, "version": 3},
+            "schematic": {"page_layout_descr_file": sheets.DRAWING_SHEET},
             "sheets": [[design.root_uuid, "Root"]] + sheets_list}
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 

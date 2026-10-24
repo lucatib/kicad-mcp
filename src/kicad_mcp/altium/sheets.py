@@ -192,6 +192,85 @@ def power_symbol(net: str, style: int, orientation: int) -> tuple[str, sexpr.SEx
     return lib_id, node
 
 
+# --- page furniture ------------------------------------------------------
+
+#: The drawing sheet the project uses: Altium's border, without KiCad's title
+#: block, since Altium's own is drawn on each sheet.
+DRAWING_SHEET = "altium_border.kicad_wks"
+
+_MARGIN = 20 * 0.254  # Altium's border sits 20 units inside the sheet edge
+
+
+def drawing_sheet(border: bool) -> str:
+    m = sy.r6(_MARGIN)
+    lines = ['(kicad_wks (version 20231118) (generator "kicad-mcp") (generator_version "10.0")',
+             '\t(setup (textsize 1.27 1.27) (linewidth 0.254) (textlinewidth 0.15)',
+             f'\t\t(left_margin {m}) (right_margin {m}) (top_margin {m}) (bottom_margin {m}))']
+    if border:
+        lines.append('\t(rect (name "") (start 0 0 ltcorner) (end 0 0) (repeat 1))')
+    return "\n".join(lines) + "\n)\n"
+
+
+def title_block(sheet: Sheet, flip: sy.Flip) -> list[sexpr.SExpr]:
+    """Altium's standard title block, which Altium draws itself and never stores.
+
+    Geometry in Altium units from its bottom-right corner, 20 units inside
+    the sheet (as documented by python-altium); the fields Altium fills in
+    itself become KiCad text variables.
+    """
+    u = 0.254
+    ox, oy = sheet.width_mm - 20 * u, 20 * u
+
+    def pt(x, y):
+        return flip.pt(ox + x * u, oy + y * u)
+
+    lines = [[(-350, 0), (-350, 80), (0, 80)], [(-350, 50), (0, 50)], [(-300, 50), (-300, 20)],
+             [(-100, 50), (-100, 20)], [(-350, 20), (0, 20)], [(-350, 10), (0, 10)],
+             [(-150, 20), (-150, 0)]]
+    out: list[sexpr.SExpr] = []
+    for i, line in enumerate(lines):
+        out.append(make("polyline", sy.pts([pt(*p) for p in line]),
+                        make("stroke", make("width", 0.254), make("type", Sym("solid"))),
+                        make("fill", make("type", Sym("none"))),
+                        make("uuid", _uid("titleblock", sheet.stem, "line", i))))
+    texts = [("Title", -345, 70), ("Size", -345, 40), (sheet.style_name, -340, 25),
+             ("Number", -295, 40), ("Revision", -95, 40), ("Date", -345, 11),
+             ("${CURRENT_DATE}", -300, 11), ("File", -345, 1), ("${FILENAME}", -300, 1),
+             ("Sheet", -145, 11), ("${#}", -125, 11), ("of", -117, 11), ("${##}", -105, 11),
+             ("Drawn By:", -145, 1)]
+    for i, (text, x, y) in enumerate(texts):
+        out.append(make("text", text, make("exclude_from_sim", False), make("at", *pt(x, y), 0),
+                        make("effects", make("font", make("size", 1.27, 1.27)),
+                             make("justify", Sym("left"), Sym("bottom"))),
+                        make("uuid", _uid("titleblock", sheet.stem, "text", i))))
+    return out
+
+
+_SPECIAL = {"sheetnumber": "${#}", "sheettotal": "${##}", "currentdate": "${CURRENT_DATE}",
+            "date": "${CURRENT_DATE}", "documentname": "${FILENAME}"}
+
+
+def _special_strings(g, sheet: Sheet):
+    """Altium's "=Title"-style texts, shown as the value they stand for."""
+    if g.kind != "label":
+        return g
+    text = g.rec.text("TEXT")
+    if not text.startswith("="):
+        return g
+    key = text[1:].strip()
+    # KiCad's own numbering and date beat values frozen into the parameters.
+    value = _SPECIAL.get(key.lower())
+    if value is None:
+        value = next((v for k, v in sheet.params.items() if k.lower() == key.lower()), None)
+    if value is None:
+        return g
+    from .model import Graphic  # noqa: PLC0415
+    from .records import Record  # noqa: PLC0415
+    rec = Record(dict(g.rec), g.rec.index)
+    rec["TEXT"] = value
+    return Graphic(g.kind, rec, g.part, g.mode)
+
+
 # --- images ---------------------------------------------------------------
 
 def _png(data: bytes) -> tuple[bytes, int, int] | None:
@@ -437,11 +516,14 @@ class _SheetWriter:
             if g.kind == "image":
                 doc += self.image(g, flip, images, stem)
                 continue
+            g = _special_strings(g, sheet)
             for item in sy.graphic_nodes(g, 0.0, 0.0, sheet.fonts, notes, yflip=flip.y):
                 if item[0] == Sym("text") or item[0] == Sym("text_box"):
                     item.insert(2, make("exclude_from_sim", False))
                 item.append(make("uuid", _uid("graphic", stem, g.rec.index, len(item))))
                 doc.append(item)
+        if sheet.title_block_on:
+            doc += title_block(sheet, flip)
 
         for n in notes:
             self.notes[n] += 1
@@ -478,8 +560,11 @@ def write_sheets(design: Design, out_dir: Path, refs: dict, footprint_fields: di
     out_dir.mkdir(parents=True, exist_ok=True)
     writer = _SheetWriter(design, refs, footprint_fields, version, board_values)
     files = writer.write_all(out_dir)
+    first = design.root.sheet or next((n.sheet for n in design.nodes()), None)
+    (out_dir / DRAWING_SHEET).write_text(drawing_sheet(first is None or first.border_on), encoding="utf-8")
     return {
         "files": files,
+        "drawing_sheet": DRAWING_SHEET,
         "approximations": [{"what": k, "count": v} for k, v in sorted(writer.notes.items())],
         "not_converted": [{"record": k, "sheet": s, "count": v}
                           for (k, s), v in sorted(writer.not_converted.items())],

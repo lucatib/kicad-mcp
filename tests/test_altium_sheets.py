@@ -78,6 +78,8 @@ def test_notes_survive(sampler):
     for g in root.graphics:
         if g.kind in ("textframe", "note", "label"):
             wanted = g.rec.text("TEXT").replace("~1", "\n")
+            if wanted.startswith("="):
+                continue  # special strings (=SheetNumber) show their value instead
             escaped = wanted.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
             assert escaped in text, wanted[:60]
 
@@ -102,3 +104,27 @@ def test_not_converted_reported(sampler):
     _, _, out = sampler
     kinds = {n["record"] for n in out["not_converted"]}
     assert "PARAMETER_SET" in kinds
+
+
+def test_altium_title_block_drawn(edp):
+    tmp, _, _ = edp
+    text = (tmp / "power.kicad_sch").read_text(encoding="utf-8")
+    for label in ('"Title"', '"Number"', '"Revision"', '"Drawn By:"'):
+        assert f"(text {label}" in text
+
+
+def test_border_only_drawing_sheet(edp):
+    tmp, _, out = edp
+    wks = tmp / sheets.DRAWING_SHEET
+    assert wks.is_file() and "(rect" in wks.read_text(encoding="utf-8")
+    assert "tbtext" not in wks.read_text(encoding="utf-8")
+    assert out["drawing_sheet"] == sheets.DRAWING_SHEET
+
+
+def test_special_strings_become_values(sampler):
+    tmp, d, _ = sampler
+    text = (tmp / "Sampler.kicad_sch").read_text(encoding="utf-8")
+    specials = [g.rec.text("TEXT") for g in d.root.sheet.graphics
+                if g.kind == "label" and g.rec.text("TEXT").lower() in ("=sheetnumber", "=sheettotal")]
+    assert specials, "fixture has no special strings"
+    assert '(text "${#}"' in text and '(text "${##}"' in text
