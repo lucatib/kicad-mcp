@@ -12,6 +12,7 @@ license = { text = "MIT" }
 dependencies = [
     "mcp>=2.3",
     "kicad-python>=0.7.1",
+    "olefile>=0.47",
 ]
 
 [project.optional-dependencies]
