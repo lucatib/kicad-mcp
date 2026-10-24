@@ -12,6 +12,7 @@ reproduce the distinction instead of guessing from content.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Iterator, Sequence
 
@@ -32,75 +33,25 @@ class Sym:
 SExpr = list
 
 
-_WHITESPACE = " \t\r\n"
+#: One token per match: "(", ")", a quoted string (escapes kept raw), or a bare
+#: atom. Leading whitespace is part of the match, so a gap between matches is
+#: a character no token can start with.
+_TOKEN = re.compile(r'[ \t\r\n]*(?:(\()|(\))|"((?:[^"\\]|\\.)*)"|([^ \t\r\n()"]+))', re.S)
+_TRAILING_WS = re.compile(r"[ \t\r\n]*")
+_STRING_ESCAPES = {"n": "\n", "t": "\t", "r": "\r"}
+_ESCAPE = re.compile(r"\\(.?)", re.S)
 
 
-class _Reader:
-    def __init__(self, text: str) -> None:
-        self.text = text
-        self.i = 0
-        self.n = len(text)
+def _error(text: str, i: int, msg: str) -> SyntaxError:
+    line = text.count("\n", 0, i) + 1
+    col = i - (text.rfind("\n", 0, i) + 1) + 1
+    return SyntaxError(f"{msg} at line {line} column {col}")
 
-    def error(self, msg: str) -> SyntaxError:
-        line = self.text.count("\n", 0, self.i) + 1
-        col = self.i - (self.text.rfind("\n", 0, self.i) + 1) + 1
-        return SyntaxError(f"{msg} at line {line} column {col}")
 
-    def skip_ws(self) -> None:
-        while self.i < self.n and self.text[self.i] in _WHITESPACE:
-            self.i += 1
-
-    def read(self) -> object:
-        self.skip_ws()
-        if self.i >= self.n:
-            raise self.error("unexpected end of input")
-        ch = self.text[self.i]
-        if ch == "(":
-            return self.read_list()
-        if ch == ")":
-            raise self.error("unexpected ')'")
-        if ch == '"':
-            return self.read_string()
-        return self.read_atom()
-
-    def read_list(self) -> SExpr:
-        self.i += 1  # consume '('
-        out: SExpr = []
-        while True:
-            self.skip_ws()
-            if self.i >= self.n:
-                raise self.error("unterminated list")
-            if self.text[self.i] == ")":
-                self.i += 1
-                return out
-            out.append(self.read())
-
-    def read_string(self) -> str:
-        self.i += 1  # consume opening quote
-        chunks: list[str] = []
-        while True:
-            if self.i >= self.n:
-                raise self.error("unterminated string")
-            ch = self.text[self.i]
-            if ch == "\\":
-                nxt = self.text[self.i + 1] if self.i + 1 < self.n else ""
-                chunks.append({"n": "\n", "t": "\t", "r": "\r"}.get(nxt, nxt))
-                self.i += 2
-                continue
-            if ch == '"':
-                self.i += 1
-                return "".join(chunks)
-            chunks.append(ch)
-            self.i += 1
-
-    def read_atom(self) -> object:
-        start = self.i
-        while self.i < self.n and self.text[self.i] not in _WHITESPACE + "()\"":
-            self.i += 1
-        raw = self.text[start : self.i]
-        if not raw:
-            raise self.error("empty atom")
-        return _coerce_atom(raw)
+def _unescape(raw: str) -> str:
+    if "\\" not in raw:
+        return raw
+    return _ESCAPE.sub(lambda m: _STRING_ESCAPES.get(m.group(1), m.group(1)), raw)
 
 
 def _coerce_atom(raw: str) -> object:
@@ -121,15 +72,63 @@ def _coerce_atom(raw: str) -> object:
 
 
 def parse(text: str) -> SExpr:
-    """Parse a complete KiCad file into a single top-level node."""
-    reader = _Reader(text)
-    node = reader.read()
-    reader.skip_ws()
-    if reader.i != reader.n:
-        raise reader.error("trailing content after top-level expression")
-    if not isinstance(node, list):
+    """Parse a complete KiCad file into a single top-level node.
+
+    One regex scan with an explicit stack; each distinct atom ("yes", "1.27")
+    is converted once and shared, since the values are immutable. A large
+    library parses several times faster than with a character-by-character
+    reader.
+    """
+    atoms: dict[str, object] = {}
+    stack: list[SExpr] = []
+    top: object = None
+    i, n = 0, len(text)
+    match = _TOKEN.match
+    while True:
+        m = match(text, i)
+        if m is None:
+            ws = _TRAILING_WS.match(text, i).end()
+            if ws >= n:
+                if stack:
+                    raise _error(text, n, "unterminated list")
+                break
+            if text[ws] == '"':
+                raise _error(text, ws, "unterminated string")
+            raise _error(text, ws, "unexpected character")
+        i = m.end()
+        opener, closer, string, atom = m.groups()
+        if opener:
+            if top is not None and not stack:
+                raise _error(text, m.start(1), "trailing content after top-level expression")
+            node: SExpr = []
+            if stack:
+                stack[-1].append(node)
+            stack.append(node)
+            continue
+        if closer:
+            if not stack:
+                raise _error(text, m.start(2), "unexpected ')'")
+            done = stack.pop()
+            if not stack:
+                top = done
+            continue
+        if string is not None:
+            value: object = _unescape(string)
+        else:
+            value = atoms.get(atom)
+            if value is None:
+                value = atoms[atom] = _coerce_atom(atom)
+        if not stack:
+            if top is not None:
+                raise _error(text, m.start(), "trailing content after top-level expression")
+            top = value
+            continue
+        stack[-1].append(value)
+    if top is None:
+        raise _error(text, n, "unexpected end of input")
+    if not isinstance(top, list):
         raise SyntaxError("top level of a KiCad file must be a list")
-    return node
+    return top
 
 
 def _escape(s: str) -> str:

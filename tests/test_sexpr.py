@@ -74,3 +74,26 @@ def test_children_and_find_all():
     tree = sexpr.parse("(root (x 1) (x 2) (y (x 3)))")
     assert len(list(sexpr.children(tree, "x"))) == 2  # direct children only
     assert len(list(sexpr.find_all(tree, "x"))) == 3  # recursive
+
+
+def test_string_escapes_and_whitespace():
+    tree = sexpr.parse('(t "line\\nnext\\ttab \\"q\\" back\\\\slash" "")\r\n')
+    assert tree[1] == 'line\nnext\ttab "q" back\\slash'
+    assert tree[2] == ""
+
+
+def test_atoms_keep_their_kinds():
+    tree = sexpr.parse("(a 7 -1.5 1e3 yes R1 +5V)")
+    assert tree[1:] == [7, -1.5, 1000.0, sexpr.Sym("yes"), sexpr.Sym("R1"), sexpr.Sym("+5V")]
+    assert isinstance(tree[1], int) and isinstance(tree[3], float)
+
+
+def test_strings_and_parentheses_inside_strings():
+    tree = sexpr.parse('(a "(not a list)" b)')
+    assert tree == [sexpr.Sym("a"), "(not a list)", sexpr.Sym("b")]
+
+
+@pytest.mark.parametrize("text", ["", "   ", ")", "(a))", '(a "open', "x"])
+def test_rejects_malformed(text):
+    with pytest.raises(SyntaxError):
+        sexpr.parse(text)
