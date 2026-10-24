@@ -99,9 +99,12 @@ rests on them.
 - Separate `.kicad_sym` / `.pretty` libraries. Symbols and footprints live
   inside the project's schematic and board (user's decision).
 - Altium libraries (`.SchLib`, `.PcbLib`, `.IntLib`) as inputs.
-- Altium variants, Draftsman, OutJobs, rules beyond what `kicad-cli pcb
-  import` already maps, and the ASCII `.SchDoc` format. A `.SchDoc` that is
-  not an OLE file is reported as unsupported.
+- Altium variants, Draftsman, OutJobs, and rules beyond what `kicad-cli pcb
+  import` already maps.
+- **ASCII `.SchDoc` is in scope after all.** It carries the same records, one
+  per line (`|HEADER=Protel for Windows - Schematic Capture Ascii File…`), so
+  it is read too (KiCad's `ticket1303` sample). Binary records inside an OLE
+  `.SchDoc` (flag byte ≠ 0) are counted in `not_converted`. *[builder call]*
 - Round-tripping back to Altium.
 - Editing or fixing the Altium files.
 
