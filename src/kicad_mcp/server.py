@@ -359,9 +359,10 @@ def find_project_files(directory: str) -> dict:
 
 @mcp.tool()
 @tool_result
-def schematic_netlist(path: str, include_nodes: bool = True, limit: int = 400) -> dict:
-    """Export and parse a schematic's netlist via kicad-cli: every component and every net with its connected pins. The most complete view of schematic connectivity available in KiCad 10."""
-    result = kcli.export_netlist(install(), path)
+def schematic_netlist(path: str, include_nodes: bool = True, limit: int = 400,
+                      variant: str | None = None) -> dict:
+    """Export and parse a schematic's netlist via kicad-cli: every component and every net with its connected pins. The most complete view of schematic connectivity available in KiCad 10. `variant` (see list_variants) netlists that design variant instead of the default."""
+    result = kcli.export_netlist(install(), path, variant=variant)
     if not result.get("output_file"):
         return {"error": "NetlistFailed", "message": result.get("stderr") or result.get("stdout"),
                 "remedy": "Check the schematic path and that the file is valid."}
@@ -406,18 +407,20 @@ def run_drc(path: str, violation_type: str | None = None, severity: str | None =
 def render_pcb_3d(path: str, output: str | None = None, side: str = "top",
                   width: int = 1600, height: int = 1200, quality: str = "basic",
                   rotate: str | None = None, zoom: float = 1.0,
-                  perspective: bool = False, inline: bool = True) -> dict | list[dict | Image]:
+                  perspective: bool = False, inline: bool = True,
+                  variant: str | None = None) -> dict | list[dict | Image]:
     """Render a .kicad_pcb in 3D via kicad-cli, as KiCad's 3D viewer shows it -- board outline, cutouts, milled slots, holes, components and 3D models. Works with KiCad closed.
 
     `side`: top, bottom, left, right, front or back. `rotate` takes 'X,Y,Z'
     degrees ('-45,0,45' is isometric). `quality`: basic, high, user or
     job_settings. `output` is a .png/.jpg path; by default the image goes to
     the temp folder. Returns the file path, and with `inline` (default) the
-    image itself to look at.
+    image itself to look at. `variant` (see list_variants) renders that design
+    variant, without the parts it does not fit.
     """
     result = kcli.render_pcb(install(), path, output=output, side=side, width=width,
                              height=height, quality=quality, rotate=rotate, zoom=zoom,
-                             perspective=perspective)
+                             perspective=perspective, variant=variant)
     if inline and result.get("output_file"):
         return [result, Image(path=result["output_file"])]
     return result
@@ -425,16 +428,40 @@ def render_pcb_3d(path: str, output: str | None = None, side: str = "top",
 
 @mcp.tool()
 @tool_result
-def export_bom(path: str, output: str | None = None) -> dict:
-    """Export a Bill of Materials from a schematic to CSV via kicad-cli."""
-    return kcli.export_bom(install(), path, output)
+def export_bom(path: str, output: str | None = None, variant: str | None = None) -> dict:
+    """Export a Bill of Materials from a schematic to CSV via kicad-cli.
+
+    `variant` exports the BOM of one design variant (its not-fitted parts are
+    marked DNP); call list_variants first for the names. Without it, the
+    default variant, i.e. the design as drawn.
+    """
+    return kcli.export_bom(install(), path, output, variant=variant)
 
 
 @mcp.tool()
 @tool_result
-def export_schematic(path: str, fmt: str = "pdf", output: str | None = None) -> dict:
-    """Plot a schematic to pdf, svg, dxf, ps, or hpgl via kicad-cli."""
-    return kcli.export_plot(install(), path, fmt, output)
+def list_variants(path: str) -> dict:
+    """List a project's design variants and what each one changes. Works with KiCad closed.
+
+    `path` is any file of the project (.kicad_sch, .kicad_pcb or .kicad_pro).
+    For each variant: its description, the parts it does not fit, the parts it
+    leaves out of the BOM or the board, and the fields it gives other values.
+    Pass a name as `variant` to export_bom, export_schematic,
+    schematic_netlist or render_pcb_3d.
+    """
+    out = kcli.variant_summary(path)
+    if not out["variants"]:
+        out["note"] = ("This project has no variants: every export is the design as drawn. "
+                       "Variants are defined in KiCad's schematic editor (KiCad 10 or later).")
+    return out
+
+
+@mcp.tool()
+@tool_result
+def export_schematic(path: str, fmt: str = "pdf", output: str | None = None,
+                     variant: str | None = None) -> dict:
+    """Plot a schematic to pdf, svg, dxf, ps, or hpgl via kicad-cli. `variant` (see list_variants) plots that design variant."""
+    return kcli.export_plot(install(), path, fmt, output, variant=variant)
 
 
 # --- import --------------------------------------------------------------

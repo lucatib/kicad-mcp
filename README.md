@@ -160,7 +160,7 @@ On Linux and macOS the command is the venv's `bin/python`, e.g.
 
 **Schematic** (files; works with KiCad closed) — `open_schematic`,
 `list_schematic_symbols`, `find_project_files`, `schematic_netlist`, `run_erc`,
-`export_bom`, `export_schematic`
+`export_bom`, `export_schematic`, `list_variants`
 
 **Symbol libraries** — `list_symbol_libraries`, `search_symbols`, `get_symbol_pins`,
 `create_library_symbol`
@@ -487,6 +487,29 @@ The list it returns is capped at `limit` and can be narrowed:
 
 `violation_type` takes globs (`silk_*`) and `severity` is `error` or `warning`.
 The complete report stays on disk at `report_file`.
+
+### Design variants: `list_variants`
+
+KiCad 10 projects can have design variants: one schematic, several builds that
+differ in which parts are fitted, which go in the BOM, or what some fields say.
+
+```json
+{"path": "C:/proj/sensor.kicad_sch"}
+```
+
+`list_variants` takes any file of the project and returns each variant with its
+description and what it changes: the parts it does not fit, the parts it leaves
+out of the BOM or the board, and the fields it gives other values. Pass a name
+as `variant` to `export_bom`, `export_schematic`, `schematic_netlist` or
+`render_pcb_3d` to get that build:
+
+```json
+{"path": "C:/proj/sensor.kicad_sch", "variant": "Lite"}
+```
+
+Without `variant` they export the default, the design as drawn. A name the
+project does not have is refused with the names it does have, because
+kicad-cli would quietly export the default instead.
 
 ### Importing from Altium: `import_altium`
 

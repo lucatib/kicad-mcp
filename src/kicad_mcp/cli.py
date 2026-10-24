@@ -117,13 +117,111 @@ def _require_file(path: str | Path, suffix: str) -> Path:
     return p
 
 
+def project_variants(path: str | Path) -> list[dict]:
+    """The design variants of the project `path` belongs to: name and description.
+
+    KiCad 10 lists them in the .kicad_pro; each symbol keeps its own
+    differences (not fitted, out of the BOM, other field values) per variant.
+    """
+    from .hierarchy import find_project_dir  # noqa: PLC0415 - avoid a cycle
+
+    folder = find_project_dir(path)
+    if folder is None:
+        return []
+    src = Path(path)
+    pros = sorted(folder.glob("*.kicad_pro"))
+    pro = next((p for p in pros if p.stem == src.stem), pros[0] if pros else None)
+    try:
+        data = json.loads(pro.read_text(encoding="utf-8"))
+    except (OSError, ValueError, AttributeError):
+        return []
+    entries = (data.get("schematic") or {}).get("variants") or []
+    return [{"name": e.get("name", ""), "description": e.get("description", "")}
+            for e in entries if isinstance(e, dict) and e.get("name")]
+
+
+VARIANT_DEFAULT_NOTE = "the design as drawn, used when no variant is given"
+
+
+def variant_summary(path: str | Path) -> dict:
+    """Each variant of the project and what it changes, read from the sheets.
+
+    A variant only records how its parts differ from the drawn design: not
+    fitted (dnp), left out of the BOM or the board, or other field values.
+    """
+    from . import sexpr  # noqa: PLC0415
+    from .hierarchy import find_project_dir  # noqa: PLC0415
+
+    variants = project_variants(path)
+    changes: dict[str, dict[str, list]] = {
+        v["name"]: {"not_fitted": [], "excluded_from_bom": [], "excluded_from_board": [],
+                    "changed_fields": []} for v in variants}
+    folder = find_project_dir(path) or Path(path).parent
+    for sch in sorted(folder.glob("*.kicad_sch")):
+        try:
+            doc = sexpr.parse(sch.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, UnicodeDecodeError):
+            continue
+        for path_node in sexpr.find_all(doc, "path"):
+            ref = sexpr.value(path_node, "reference")
+            if ref is None:
+                continue
+            ref = sexpr.as_text(ref)
+            for var in sexpr.children(path_node, "variant"):
+                name = sexpr.as_text(sexpr.value(var, "name", ""))
+                entry = changes.setdefault(name, {"not_fitted": [], "excluded_from_bom": [],
+                                                  "excluded_from_board": [], "changed_fields": []})
+
+                def flag(key: str) -> str | None:
+                    v = sexpr.value(var, key)
+                    return None if v is None else sexpr.as_text(v)
+
+                if flag("dnp") == "yes":
+                    entry["not_fitted"].append(ref)
+                if flag("in_bom") == "no":
+                    entry["excluded_from_bom"].append(ref)
+                if flag("on_board") == "no":
+                    entry["excluded_from_board"].append(ref)
+                for f in sexpr.children(var, "field"):
+                    entry["changed_fields"].append({
+                        "reference": ref, "field": sexpr.as_text(sexpr.value(f, "name", "")),
+                        "value": sexpr.as_text(sexpr.value(f, "value", ""))})
+    described = {v["name"]: v["description"] for v in variants}
+    out = []
+    for name, entry in changes.items():
+        for key in ("not_fitted", "excluded_from_bom", "excluded_from_board"):
+            entry[key] = sorted(set(entry[key]))
+        out.append({"name": name, "description": described.get(name, ""),
+                    "listed_in_project": name in described, **entry})
+    return {"variants": out, "default": VARIANT_DEFAULT_NOTE}
+
+
+def _variant_args(path: Path, variant: str | None) -> list[str]:
+    """`--variant NAME` for kicad-cli, once NAME is known to exist.
+
+    kicad-cli quietly exports the default variant for a name it does not
+    know, which would pass a wrong BOM off as the requested one.
+    """
+    if not variant:
+        return []
+    names = [v["name"] for v in project_variants(path)]
+    if variant not in names:
+        have = ", ".join(names) if names else "none"
+        raise ToolInputError(f"No variant {variant!r} in this project (variants: {have}).",
+                             remedy="Call list_variants for the names, or omit variant "
+                                    "for the default.")
+    return ["--variant", variant]
+
+
 def export_netlist(
-    install, schematic: str | Path, output: str | Path | None = None, fmt: str = "kicadxml"
+    install, schematic: str | Path, output: str | Path | None = None, fmt: str = "kicadxml",
+    variant: str | None = None,
 ) -> dict:
     src = _require_file(schematic, ".kicad_sch")
     out = Path(output) if output else src.with_suffix(".net.xml" if fmt == "kicadxml" else ".net")
     result = run_cli(
-        install, ["sch", "export", "netlist", "--format", fmt, "-o", str(out), str(src)]
+        install, ["sch", "export", "netlist", "--format", fmt, *_variant_args(src, variant),
+                  "-o", str(out), str(src)]
     )
     result["output_file"] = str(out) if out.is_file() else None
     return result
@@ -215,10 +313,13 @@ def erc_violation_count(install, schematic: str | Path) -> int:
     return sum(len(sheet.get("violations", [])) for sheet in report.get("sheets", []))
 
 
-def export_bom(install, schematic: str | Path, output: str | Path | None = None) -> dict:
+def export_bom(install, schematic: str | Path, output: str | Path | None = None,
+               variant: str | None = None) -> dict:
     src = _require_file(schematic, ".kicad_sch")
-    out = Path(output) if output else src.with_suffix(".bom.csv")
-    result = run_cli(install, ["sch", "export", "bom", "-o", str(out), str(src)])
+    out = Path(output) if output else src.with_suffix(f".{variant}.bom.csv" if variant else ".bom.csv")
+    result = run_cli(install, ["sch", "export", "bom", *_variant_args(src, variant),
+                               "-o", str(out), str(src)])
+    result["variant"] = variant
     result["output_file"] = str(out) if out.is_file() else None
     if out.is_file():
         try:
@@ -229,7 +330,7 @@ def export_bom(install, schematic: str | Path, output: str | Path | None = None)
 
 
 def export_plot(install, schematic: str | Path, fmt: str = "pdf",
-                output: str | Path | None = None) -> dict:
+                output: str | Path | None = None, variant: str | None = None) -> dict:
     if fmt not in ("pdf", "svg", "dxf", "ps", "hpgl"):
         raise ToolInputError(
             f"Unsupported schematic plot format {fmt!r}.",
@@ -237,7 +338,8 @@ def export_plot(install, schematic: str | Path, fmt: str = "pdf",
         )
     src = _require_file(schematic, ".kicad_sch")
     out = Path(output) if output else src.with_suffix(f".{fmt}")
-    result = run_cli(install, ["sch", "export", fmt, "-o", str(out), str(src)])
+    result = run_cli(install, ["sch", "export", fmt, *_variant_args(src, variant),
+                               "-o", str(out), str(src)])
     result["output_file"] = str(out) if out.exists() else None
     return result
 
@@ -249,7 +351,7 @@ RENDER_QUALITIES = ("basic", "high", "user", "job_settings")
 def render_pcb(install, board: str | Path, output: str | Path | None = None,
                side: str = "top", width: int = 1600, height: int = 1200,
                quality: str = "basic", rotate: str | None = None,
-               zoom: float = 1.0, perspective: bool = False) -> dict:
+               zoom: float = 1.0, perspective: bool = False, variant: str | None = None) -> dict:
     """Render the board in 3D to PNG or JPEG, as the 3D viewer would show it.
 
     The default output goes to the temp folder, not the project: renders are
@@ -274,7 +376,8 @@ def render_pcb(install, board: str | Path, output: str | Path | None = None,
     out.parent.mkdir(parents=True, exist_ok=True)
 
     args = ["pcb", "render", "-o", str(out), "--side", side, "--width", str(width),
-            "--height", str(height), "--quality", quality, "--zoom", str(zoom)]
+            "--height", str(height), "--quality", quality, "--zoom", str(zoom),
+            *_variant_args(src, variant)]
     if rotate:
         args += ["--rotate", rotate]
     if perspective:
