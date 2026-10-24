@@ -26,6 +26,9 @@ packages = ["src/kicad_mcp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The slow tests import a 12 MB Altium board end to end; run them with
+# `pytest -m slow`. A later -m on the command line replaces this one.
+addopts = "-m 'not slow'"
 markers = [
     "requires_kicad: needs a KiCad installation present",
     "requires_running_kicad: needs KiCad running with the IPC server enabled",

@@ -604,7 +604,10 @@ instances and files you trust.
 ```
 
 (`.venv/bin/python` on Linux and macOS.) Tests marked `requires_kicad` need an
-installation for its symbol libraries. Live-IPC behaviour is verified manually —
+installation for its symbol libraries. Tests marked `slow` import a large Altium
+design end to end (a few minutes) and are skipped unless asked for:
+`pytest -m slow` runs only them, `pytest -m ""` runs everything. The Altium tests
+download their sample files once into `tests/.altium_cache/` and skip offline. Live-IPC behaviour is verified manually —
 it needs a GUI session with a board open, which is not worth automating.
 
 ## Scope
