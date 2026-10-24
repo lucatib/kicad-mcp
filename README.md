@@ -641,7 +641,10 @@ instances and files you trust.
 installation for its symbol libraries. Tests marked `slow` import a large Altium
 design end to end (a few minutes) and are skipped unless asked for:
 `pytest -m slow` runs only them, `pytest -m ""` runs everything. The Altium tests
-download their sample files once into `tests/.altium_cache/` and skip offline. Live-IPC behaviour is verified manually —
+download their sample files once into `tests/.altium_cache/` and skip offline.
+The suite runs in parallel on up to 8 processes (`pytest-xdist`, installed by
+`.[dev]`); add `-n0` to run it in one process, for instance under a debugger.
+Live-IPC behaviour is verified manually —
 it needs a GUI session with a board open, which is not worth automating.
 
 ## Scope

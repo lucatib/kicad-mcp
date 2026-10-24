@@ -9,6 +9,7 @@ instead of vendored. Without network the tests that need them skip.
 from __future__ import annotations
 
 import hashlib
+import os
 import urllib.request
 from pathlib import Path
 
@@ -105,7 +106,10 @@ def altium_fixture(name: str) -> Path:
         pytest.skip(f"cannot fetch Altium fixture {name}: {exc}")
     if hashlib.sha256(data).hexdigest() != sha:
         pytest.fail(f"Altium fixture {name} does not match its pinned SHA-256")
-    target.write_bytes(data)
+    # Parallel workers may fetch the same file at once: write aside, then swap in.
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.part")
+    tmp.write_bytes(data)
+    os.replace(tmp, target)
     return target
 
 

@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "pytest-xdist>=3.6"]
 
 [project.scripts]
 kicad-mcp = "kicad_mcp.__main__:main"
@@ -28,7 +28,9 @@ packages = ["src/kicad_mcp"]
 testpaths = ["tests"]
 # The slow tests import a 12 MB Altium board end to end; run them with
 # `pytest -m slow`. A later -m on the command line replaces this one.
-addopts = "-m 'not slow'"
+# -n auto runs the suite on up to 8 processes (tests/conftest.py caps it): it
+# mostly waits on kicad-cli. Pass -n0 to run in one process, e.g. to debug.
+addopts = "-m 'not slow' -n auto"
 markers = [
     "requires_kicad: needs a KiCad installation present",
     "requires_running_kicad: needs KiCad running with the IPC server enabled",
