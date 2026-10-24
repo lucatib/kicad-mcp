@@ -7,6 +7,8 @@ records one per line. Everything else in the importer reads these records.
 
 from __future__ import annotations
 
+import io
+
 import pytest
 
 from kicad_mcp.altium import records
@@ -89,3 +91,37 @@ def test_ascii_file_read_from_disk(tmp_path):
     header, recs, binary = records.read_schdoc_records(f)
     assert "Ascii" in header.text("HEADER")
     assert recs[0].text("UNIQUEID") == "ZZZZ" and binary == 0
+
+
+def test_fixture_download_tolerates_a_parallel_worker(tmp_path, monkeypatch):
+    # Two xdist workers fetch the same file; on Windows the second swap-in
+    # fails with "access denied" while the first holds it open.
+    import hashlib
+
+    import altium_fixtures as af
+
+    data = b"altium bytes"
+    sha = hashlib.sha256(data).hexdigest()
+    monkeypatch.setattr(af, "CACHE", tmp_path)
+    monkeypatch.setattr(af, "FIXTURES", {"x/f.SchDoc": ("https://example.invalid/f", sha)})
+
+    class Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(url, timeout=0):
+        # The other worker finishes first, while this one downloads.
+        (tmp_path / "x").mkdir(exist_ok=True)
+        (tmp_path / "x" / "f.SchDoc").write_bytes(data)
+        return Resp(data)
+
+    def locked(src, dst):
+        raise PermissionError(5, "Access is denied")
+
+    monkeypatch.setattr(af.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(af.os, "replace", locked)
+    assert af.altium_fixture("x/f.SchDoc").read_bytes() == data
+    assert not list((tmp_path / "x").glob("*.part"))

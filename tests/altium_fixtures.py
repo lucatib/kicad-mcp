@@ -106,10 +106,17 @@ def altium_fixture(name: str) -> Path:
         pytest.skip(f"cannot fetch Altium fixture {name}: {exc}")
     if hashlib.sha256(data).hexdigest() != sha:
         pytest.fail(f"Altium fixture {name} does not match its pinned SHA-256")
-    # Parallel workers may fetch the same file at once: write aside, then swap in.
+    # Parallel workers may fetch the same file at once: write aside, then swap
+    # in. On Windows the swap fails while another worker holds the file open;
+    # then that worker's copy, already checked, is the one to use.
     tmp = target.with_name(f"{target.name}.{os.getpid()}.part")
     tmp.write_bytes(data)
-    os.replace(tmp, target)
+    try:
+        os.replace(tmp, target)
+    except PermissionError:
+        tmp.unlink(missing_ok=True)
+        if not (target.is_file() and _sha256(target) == sha):
+            raise
     return target
 
 
