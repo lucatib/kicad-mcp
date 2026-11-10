@@ -166,7 +166,8 @@ class SchematicEditor:
         right, bottom = w - PAGE_MARGIN, h - PAGE_MARGIN
         return (right - TITLE_BLOCK[0], bottom - TITLE_BLOCK[1], right - 2, bottom - 2)
 
-    def free_spot(self, index: SymbolIndex, lib_id: str, inflate: float = 0.0) -> tuple[float, float]:
+    def free_spot(self, index: SymbolIndex, lib_id: str, inflate: float = 0.0,
+                  unit: int = 1) -> tuple[float, float]:
         """An on-page origin for `lib_id` that clears everything already drawn.
 
         Tries, in order: right of existing content, row by row from the top
@@ -179,7 +180,7 @@ class SchematicEditor:
         drawing area, off the title block, and clear of every symbol, wire,
         label and sheet by at least half of PLACE_MARGIN.
         """
-        rel, fits, anchors = self._fitter(index, lib_id, inflate)
+        rel, fits, anchors = self._fitter(index, lib_id, inflate, unit=unit)
         for _, y, x in sorted(self._candidates(rel, anchors)):
             if fits(x, y):
                 return x, y
@@ -191,6 +192,7 @@ class SchematicEditor:
         lib_id: str,
         links: list[tuple[PinInfo, list[tuple[tuple[float, float], tuple[int, int] | None]]]],
         inflate: float = 0.0,
+        unit: int = 1,
     ) -> tuple[float, float, str | None]:
         """Origin and mirroring for `lib_id` that keep its wires short.
 
@@ -206,8 +208,8 @@ class SchematicEditor:
         partners = [pt for _, ps in links for pt, _ in ps]
         pxs, pys = [p[0] for p in partners], [p[1] for p in partners]
         for mirror in (None, "y"):
-            rel, fits, anchors = self._fitter(index, lib_id, inflate, mirror)
-            probe = PlacedSymbol("", "", lib_id, x=0.0, y=0.0, angle=0.0, unit=1, uuid="", mirror=mirror)
+            rel, fits, anchors = self._fitter(index, lib_id, inflate, mirror, unit)
+            probe = PlacedSymbol("", "", lib_id, x=0.0, y=0.0, angle=0.0, unit=unit, uuid="", mirror=mirror)
             pins = [(probe.pin_point(p), probe.pin_outward(p), ps) for p, ps in links]
             y0 = sum(pys) / len(pys) - sum(pt[1] for pt, _, _ in pins) / len(pins)
             candidates = self._candidates(rel, anchors)
@@ -273,9 +275,10 @@ class SchematicEditor:
                 out.setdefault(name, []).append(hit)
         return out
 
-    def _fitter(self, index: SymbolIndex, lib_id: str, inflate: float, mirror: str | None = None):
+    def _fitter(self, index: SymbolIndex, lib_id: str, inflate: float, mirror: str | None = None,
+                unit: int = 1):
         """(relative box, fits(x, y), anchors) for placing `lib_id` on this sheet."""
-        rl, rt, rr, rb = _relative_box(index, lib_id)
+        rl, rt, rr, rb = _relative_box(index, lib_id, unit)
         if mirror == "y":
             rl, rr = -rr, -rl
         rel = (rl - inflate, rt - inflate, rr + inflate, rb + inflate)
@@ -320,9 +323,13 @@ class SchematicEditor:
                    "or pass explicit x/y coordinates.",
         )
 
-    def placement_warnings(self, index: SymbolIndex, lib_id: str, x: float, y: float) -> list[str]:
+    def placement_warnings(self, index: SymbolIndex, lib_id: str, x: float, y: float,
+                           unit: int = 1, angle: int = 0) -> list[str]:
         """Why an explicitly chosen position is a bad one, if it is."""
-        rl, rt, rr, rb = _relative_box(index, lib_id)
+        rl, rt, rr, rb = _relative_box(index, lib_id, unit)
+        if angle % 180:  # lying on its side: the extents swap, whichever way it turned
+            half_w, half_h = max(abs(rt), abs(rb)), max(abs(rl), abs(rr))
+            rl, rt, rr, rb = -half_w, -half_h, half_w, half_h
         box = (x + rl, y + rt, x + rr, y + rb)
         out = []
         if not _inside(box, self.drawing_area()):
@@ -448,14 +455,11 @@ class SchematicEditor:
         pass the pin's real function (e.g. "/RES") when the symbol's own pin
         name is generic or the net was never actually wired to anything.
         """
-        lib_id, x, y, angle = self.placement(reference)
-        placed = PlacedSymbol(reference, "", lib_id, x=x, y=y, angle=angle, unit=1, uuid="")
-        all_pins = index.pins(lib_id)
-
+        units = self.placements(index, reference)
         wanted = set(pin_numbers or [])
         needle = name_contains.lower() if name_contains else None
         matched = [
-            p for p in all_pins
+            (placed, p) for placed in units for p in placed.pins
             if p.number in wanted or (needle and needle in p.name.lower())
         ]
         if not matched:
@@ -467,7 +471,7 @@ class SchematicEditor:
 
         builder = self._builder()
         marked = []
-        for pin in matched:
+        for placed, pin in matched:
             pt = placed.pin_point(pin)
             builder.add_no_connect(pt)
             if annotate:
@@ -489,9 +493,26 @@ class SchematicEditor:
         footprint: str = "",
         at: tuple[float, float] | None = None,
         global_nets: list[str] | None = None,
+        unit: int = 1,
+        mirror: str | None = None,
+        angle: int = 0,
+        library_fields: bool = False,
     ) -> dict:
         """Place a new symbol into this (already-existing) schematic and wire
         named pins to nets.
+
+        `mirror` ("x" flips top/bottom, "y" left/right) draws the symbol
+        mirrored at `at`; without `at` the placement picks its own mirroring.
+        `angle` (0, 90, 180, 270, counter-clockwise as in KiCad) turns it at
+        `at`, so a resistor can lie in line with the wire it sits in.
+        `library_fields` puts Reference and Value where the library draws
+        them (beside a resistor, at a valve's shoulder) instead of centred
+        above and below the outermost pins, where pin labels also go.
+
+        `unit` picks one unit of a multi-unit part (a dual triode's second
+        section, an op-amp pair's power unit). Placing a further unit under a
+        reference already on this sheet adds it to that part: same lib_id,
+        Value, Footprint and annotation, only the unit differs.
 
         This is `generate_pinout_schematic`'s pin-matching and net-joining,
         aimed at a file that already has content instead of authoring a fresh
@@ -506,30 +527,64 @@ class SchematicEditor:
         joins = self.net_joins(index, assignments.values(), global_nets)
         prefix = "".join(c for c in lib_id.split(":")[-1] if c.isalpha())[:1] or "U"
         warnings = []
-        if reference and reference in self.taken_references():
+        units = sorted({p.unit for p in index.pins(lib_id)} - {0}) or [1]
+        if unit not in units:
+            raise ToolInputError(
+                f"{lib_id} has no unit {unit}.",
+                remedy=f"Its units: {', '.join(map(str, units))}.",
+            )
+        siblings = [s for s in sexpr.children(self.tree, "symbol") if reference and _reference(s) == reference]
+        instance_refs = None
+        if siblings:
+            first = siblings[0]
+            if str(sexpr.value(first, "lib_id", "")) != lib_id:
+                raise ToolInputError(
+                    f"{reference} is already a {sexpr.value(first, 'lib_id', '')} on {self.path.name}.",
+                    remedy="Pass another reference, or the same lib_id to add a unit to it.",
+                )
+            placed_units = sorted(int(sexpr.value(s, "unit", 1) or 1) for s in siblings)
+            if unit in placed_units:
+                raise ToolInputError(
+                    f"Unit {unit} of {reference} is already placed.",
+                    remedy=f"Placed units: {', '.join(map(str, placed_units))}; free ones: "
+                           f"{', '.join(str(u) for u in units if u not in placed_units) or 'none'}.",
+                )
+            value = value if value is not None else _field_text(first, "Value")
+            footprint = footprint or _field_text(first, "Footprint") or ""
+            instance_refs = _references_by_path(first)
+        elif reference and reference in self.taken_references():
             warnings.append(f"{reference} is already used in project {self.place.project}; "
                             "rename one of them with set_symbol_fields.")
         reference = reference or self.next_reference(prefix)
         value = value if value is not None else lib_id.split(":")[-1]
-        mirror = None
+        if mirror not in (None, "x", "y"):
+            raise ToolInputError(f"mirror must be 'x' or 'y', not {mirror!r}.", remedy="Use 'x' (top/bottom) or 'y' (left/right).")
+        if mirror and not at:
+            raise ToolInputError("mirror needs an explicit position.", remedy="Pass x and y along with mirror.")
+        if angle not in (0, 90, 180, 270):
+            raise ToolInputError(f"angle must be 0, 90, 180 or 270, not {angle!r}.")
+        if angle and not at:
+            raise ToolInputError("angle needs an explicit position.", remedy="Pass x and y along with angle.")
         if at:
             x, y = _snap(at[0]), _snap(at[1])
-            warnings += self.placement_warnings(index, lib_id, x, y)
+            warnings += self.placement_warnings(index, lib_id, x, y, unit, angle)
         else:
             # Room for the labels about to hang off its pins, not just the body.
             longest = max((len(str(net)) for net in assignments.values()), default=0)
             inflate = LABEL_STUB + longest * 1.27 if assignments else 0.0
             # A rail is everywhere; sitting next to one of its pins says nothing.
             signals = {k: v for k, v in assignments.items() if joins[str(v)].via != "power_symbol"}
-            links = self._links(index, lib_id, signals)
+            links = self._links(index, lib_id, signals, unit)
             if links:
-                x, y, mirror = self.connected_spot(index, lib_id, links, inflate=inflate)
+                x, y, mirror = self.connected_spot(index, lib_id, links, inflate=inflate, unit=unit)
             else:
-                x, y = self.free_spot(index, lib_id, inflate=inflate)
+                x, y = self.free_spot(index, lib_id, inflate=inflate, unit=unit)
 
         builder = self._builder()
-        placed = builder.add_symbol(index, lib_id, reference, value, x=x, y=y,
-                                    footprint=footprint, mirror=mirror)
+        placed = builder.add_symbol(index, lib_id, reference, value, x=x, y=y, angle=angle, unit=unit,
+                                    footprint=footprint, mirror=mirror, instance_references=instance_refs)
+        if library_fields:
+            builder.use_library_fields(placed)
 
         matched, unmatched = _match_pins([placed], assignments)
         connected = []
@@ -541,9 +596,11 @@ class SchematicEditor:
         return {
             "reference": reference,
             "lib_id": lib_id,
+            "unit": unit,
             "position": {"x": x, "y": y},
             "footprint": placed.footprint,
             "mirrored": mirror is not None,
+            "angle": angle,
             "instances": [{"path": p, "reference": r} for p, r in placed.instances],
             "warnings": warnings + self._join_warnings(joins),
             "connected": connected,
@@ -810,12 +867,12 @@ class SchematicEditor:
                 continue  # a symbol whose library is gone still can't be labelled over
         return points
 
-    def _links(self, index: SymbolIndex, lib_id: str, assignments: dict[str, str]):
+    def _links(self, index: SymbolIndex, lib_id: str, assignments: dict[str, str], unit: int = 1):
         """The new part's assigned pins, each with where its net already is."""
         if not assignments:
             return []
-        probe = PlacedSymbol("", "", lib_id, x=0.0, y=0.0, angle=0.0, unit=1, uuid="",
-                             pins=[p for p in index.pins(lib_id) if p.unit in (0, 1)])
+        probe = PlacedSymbol("", "", lib_id, x=0.0, y=0.0, angle=0.0, unit=unit, uuid="",
+                             pins=[p for p in index.pins(lib_id) if p.unit in (0, unit)])
         matched, _ = _match_pins([probe], assignments)
         partners = self.partner_pins(index, {net for _, _, net in matched})
         return [(pin, partners[net]) for _, pin, net in matched if net in partners]
@@ -1261,14 +1318,30 @@ class SchematicEditor:
         return self.path
 
 
-def _relative_box(index: SymbolIndex, lib_id: str) -> Box:
+def _field_text(symbol: sexpr.SExpr, name: str) -> str | None:
+    """A placed symbol's field value, or None."""
+    return next((str(p[2]) for p in sexpr.children(symbol, "property") if len(p) >= 3 and p[1] == name), None)
+
+
+def _references_by_path(symbol: sexpr.SExpr) -> dict[str, str]:
+    """Instance path -> reference, as a placed symbol records its annotation."""
+    out = {}
+    for project in sexpr.children(sexpr.child(symbol, "instances") or [], "project"):
+        for path in sexpr.children(project, "path"):
+            ref = sexpr.value(path, "reference")
+            if ref is not None:
+                out[str(path[1])] = str(ref)
+    return out
+
+
+def _relative_box(index: SymbolIndex, lib_id: str, unit: int = 1) -> Box:
     """Canvas box of `lib_id` placed unrotated at the origin, fields included.
 
     Reference and Value go where `SchematicBuilder.add_symbol` puts them:
     centred, one field-offset beyond the outermost pin above and below.
     """
-    local = _local_points(index.definition(lib_id), unit=1)
-    pins = [p for p in index.pins(lib_id) if p.unit in (0, 1)]
+    local = _local_points(index.definition(lib_id), unit=unit)
+    pins = [p for p in index.pins(lib_id) if p.unit in (0, unit)]
     extent = max((abs(p.y) for p in pins), default=10.0) + 5.08
     pts = [(px, -py) for px, py in local] + [(0.0, -extent), (0.0, extent)]
     return _grow(_bounds(pts), 1.27)  # field text has height of its own

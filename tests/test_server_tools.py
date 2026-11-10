@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from kicad_mcp import server
@@ -216,3 +218,90 @@ def test_create_library_symbol_outside_a_project_is_an_error_not_an_exception(tm
     res = server.create_library_symbol(str(tmp_path), "proj", "X", [{"number": "1"}])
     assert res["error"] == "ToolInputError"
     assert ".kicad_pro" in res["message"]
+
+
+def test_units_of_a_dual_triode_join_one_part(sch):
+    first = server.add_symbol_to_schematic(str(sch), "Valve:ECC83", {"A": "ANODE_B", "G": "GRID_B", "K": "GND"},
+                                           reference="V1", unit=1)
+    assert "error" not in first, first
+    second = server.add_symbol_to_schematic(str(sch), "Valve:ECC83", {"A": "ANODE_A", "G": "GRID_A"},
+                                            reference="V1", unit=2)
+    assert "error" not in second, second
+    assert second["unit"] == 2 and second["warnings"] == []
+    assert second["footprint"] == first["footprint"]
+    heater = server.add_symbol_to_schematic(str(sch), "Valve:ECC83", {"4": "HEATER", "5": "HEATER", "9": "GND"},
+                                            reference="V1", unit=3)
+    assert "error" not in heater, heater
+    nets = {(n["reference"], n["pin"]): net["name"].split("/")[-1]
+            for net in server.schematic_netlist(str(sch))["nets"] for n in net["nodes"]}
+    assert nets[("V1", "6")] == "ANODE_B" and nets[("V1", "1")] == "ANODE_A"
+    assert nets[("V1", "4")] == nets[("V1", "5")] == "HEATER"
+    listed = [s for s in server.list_schematic_symbols(str(sch))["items"] if s["reference"] == "V1"]
+    assert len({s.get("value") for s in listed}) == 1
+
+
+def test_a_placed_unit_cannot_be_placed_twice_or_under_another_part(sch):
+    assert "error" not in server.add_symbol_to_schematic(str(sch), "Valve:ECC83", {}, reference="V1", unit=1)
+    again = server.add_symbol_to_schematic(str(sch), "Valve:ECC83", {}, reference="V1", unit=1)
+    assert again["error"] == "ToolInputError" and "already placed" in again["message"]
+    other = server.add_symbol_to_schematic(str(sch), "Device:R", {}, reference="V1")
+    assert other["error"] == "ToolInputError" and "Valve:ECC83" in other["message"]
+    missing = server.add_symbol_to_schematic(str(sch), "Valve:ECC83", {}, reference="V2", unit=4)
+    assert missing["error"] == "ToolInputError" and "no unit 4" in missing["message"]
+
+
+def test_mark_pins_unused_finds_a_pin_on_a_later_unit(sch):
+    server.add_symbol_to_schematic(str(sch), "Valve:ECC83", {}, reference="V1", unit=1, x=60.96, y=60.96)
+    server.add_symbol_to_schematic(str(sch), "Valve:ECC83", {}, reference="V1", unit=2, x=101.6, y=60.96)
+    res = server.mark_pins_unused(str(sch), "V1", ["1"])
+    assert "error" not in res, res
+    # the cross sits on unit 2's own pin 1, not where unit 1 would put it
+    report = server.run_erc(str(sch))["report"]
+    assert "V1 Pin 1 " not in report
+    assert "V1 Pin 2 " in report  # an unmarked pin still shows, so the check can see pins at all
+
+
+def test_mirror_and_angle_move_the_pins_they_should(sch):
+    plain = server.add_symbol_to_schematic(str(sch), "Valve:ECC83", {"G": "IN_A"}, reference="V1", unit=1,
+                                           x=101.6, y=101.6)
+    facing = server.add_symbol_to_schematic(str(sch), "Valve:ECC83", {"G": "IN_B"}, reference="V2", unit=1,
+                                            x=152.4, y=101.6, mirror="y")
+    assert "error" not in plain and "error" not in facing, (plain, facing)
+    lying = server.add_symbol_to_schematic(str(sch), "Device:R", {"1": "IN_A", "2": "IN_B"}, reference="R1",
+                                           x=127.0, y=127.0, angle=90)
+    assert "error" not in lying, lying
+    assert lying["angle"] == 90
+    assert "(mirror y)" in sch.read_text(encoding="utf-8")
+    # each end of the lying resistor lands on the grid it names: V1's on its left, the mirrored V2's on its right
+    nets = {(n["reference"], n["pin"]): net["name"].split("/")[-1]
+            for net in server.schematic_netlist(str(sch))["nets"] for n in net["nodes"]}
+    assert nets[("V1", "7")] == nets[("R1", "1")] == "IN_A"
+    assert nets[("V2", "7")] == nets[("R1", "2")] == "IN_B"
+
+
+def test_mirror_and_angle_need_a_position_and_a_legal_value(sch):
+    for kwargs, word in (({"mirror": "y"}, "position"), ({"angle": 90}, "position"),
+                         ({"angle": 45, "x": 127.0, "y": 127.0}, "angle"),
+                         ({"mirror": "z", "x": 127.0, "y": 127.0}, "mirror")):
+        res = server.add_symbol_to_schematic(str(sch), "Device:R", {}, reference="R1", **kwargs)
+        assert res["error"] == "ToolInputError" and word in res["message"], (kwargs, res)
+
+
+def test_library_fields_keeps_the_reference_where_the_library_draws_it(sch):
+    def reference_at(ref):
+        block = re.search(r'\(property "Reference" "%s"\s*\(at ([-\d.]+) ([-\d.]+)' % ref, sch.read_text(encoding="utf-8"))
+        return float(block.group(1)), float(block.group(2))
+
+    server.add_symbol_to_schematic(str(sch), "Device:R", {}, reference="R1", x=101.6, y=127.0)
+    server.add_symbol_to_schematic(str(sch), "Device:R", {}, reference="R2", x=127.0, y=127.0, library_fields=True)
+    assert reference_at("R1")[0] == 101.6, "default: centred over the pins"
+    assert reference_at("R2")[0] > 127.0, "library: beside the body"
+
+
+def test_a_derived_symbol_is_embedded_as_the_library_has_it(sch):
+    # Valve:ECC83 extends ECC81 and D:1N4007 extends 1N4001; fields only the base
+    # declares must come along, or ERC reports the copy as differing from the library.
+    server.add_symbol_to_schematic(str(sch), "Valve:ECC83", {}, reference="V1", unit=1, x=101.6, y=127.0)
+    server.add_symbol_to_schematic(str(sch), "Diode:1N4007", {}, reference="D1", x=152.4, y=127.0)
+    report = server.run_erc(str(sch), severity_all=True)["report"]
+    assert "lib_symbol_mismatch" not in report, report

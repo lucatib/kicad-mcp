@@ -371,6 +371,12 @@ class SymbolIndex:
             and sexpr._name_of(n) not in own_names
         ]
         properties = [n for n in node if isinstance(n, list) and sexpr._name_of(n) == "property"]
+        # Fields only the base declares are inherited (`ki_locked`, `Sim.*`):
+        # without them the copy differs from the library and ERC says so.
+        own_fields = {n[1] for n in properties if len(n) > 1}
+        inherited = [n for n in sexpr.children(base, "property") if len(n) > 1 and n[1] not in own_fields]
+        keys = [n for n in properties if str(n[1]).startswith("ki_")]
+        properties = [n for n in properties if n not in keys] + inherited + keys
 
         # KiCad expects each unit sub-symbol's name to be prefixed with its
         # parent's own (un-namespaced) name -- "AMS1117-3.3_1_1", not the

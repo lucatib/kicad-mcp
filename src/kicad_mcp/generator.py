@@ -154,7 +154,8 @@ class SchematicBuilder:
     def add_symbol(self, index: SymbolIndex, lib_id: str, reference: str, value: str,
                    x: float, y: float, angle: float = 0, unit: int = 1,
                    footprint: str = "", hide_value: bool = False,
-                   hide_reference: bool = False, mirror: str | None = None) -> PlacedSymbol:
+                   hide_reference: bool = False, mirror: str | None = None,
+                   instance_references: dict[str, str] | None = None) -> PlacedSymbol:
         """Place a symbol, embedding its library definition on first use.
 
         `mirror` is KiCad's "x" (flip top/bottom) or "y" (flip left/right).
@@ -166,6 +167,8 @@ class SchematicBuilder:
         `reference` annotates the first use of the sheet; a sheet used more
         than once gets the next free reference of the same prefix per extra
         use, since each use is a separate part on the board.
+        `instance_references` (path -> reference) reuses an existing part's
+        annotation instead, for a further unit of that part.
         """
         if lib_id not in self._lib_symbols:
             self._lib_symbols[lib_id] = index.definition(lib_id)
@@ -179,8 +182,11 @@ class SchematicBuilder:
         references = [reference]
         self.taken.add(reference)
         prefix = re.sub(r"[\d?]+$", "", reference)
-        for _ in paths[1:]:
-            references.append(self.next_reference(prefix, 3 if prefix.startswith("#") else 0))
+        for path in paths[1:]:
+            if instance_references and path in instance_references:
+                references.append(instance_references[path])
+            else:
+                references.append(self.next_reference(prefix, 3 if prefix.startswith("#") else 0))
             self.taken.add(references[-1])
         placed = PlacedSymbol(
             reference=reference, value=value, lib_id=lib_id,

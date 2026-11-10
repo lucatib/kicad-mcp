@@ -638,6 +638,10 @@ def add_symbol_to_schematic(
     x: float | None = None,
     y: float | None = None,
     global_nets: list[str] | None = None,
+    unit: int = 1,
+    mirror: str | None = None,
+    angle: int = 0,
+    library_fields: bool = False,
     project_dir: str | None = None,
 ) -> dict:
     """Place a symbol into an existing .kicad_sch and wire named pins to nets.
@@ -664,13 +668,23 @@ def add_symbol_to_schematic(
     the page, a footprint the project's fp-lib-table cannot resolve, a
     reference already used elsewhere, and a label that will not reach a
     same-named local label on another sheet.
+    `unit` places one unit of a multi-unit part (e.g. Valve:ECC83 has two
+    triodes and a heater unit). Call again with the same reference and the
+    next unit to add it to that part; `assignments` then name that unit's
+    pins. get_symbol_pins lists which unit each pin belongs to.
+    `mirror` with an explicit x/y draws the symbol flipped: "y" left/right (the
+    second triode of a long-tailed pair facing the first), "x" top/bottom.
+    `angle` (0/90/180/270, counter-clockwise) with an explicit x/y turns it,
+    e.g. 90 lays a resistor or capacitor in line with a horizontal wire.
+    `library_fields=True` puts Reference and Value where the library draws
+    them (beside the body) rather than above and below the outermost pins.
     """
     index = symbol_index(_project_dir_of(path, project_dir))
     editor = SchematicEditor.load(path)
     at = (x, y) if x is not None and y is not None else None
     result = editor.place_symbol(
         index, lib_id, assignments, reference=reference, value=value, footprint=footprint, at=at,
-        global_nets=global_nets,
+        global_nets=global_nets, unit=unit, mirror=mirror, angle=angle, library_fields=library_fields,
     )
     editor.save()
     warning = footprint_warning(footprint_index(_project_dir_of(path, project_dir)), result["footprint"])
