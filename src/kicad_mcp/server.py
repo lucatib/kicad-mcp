@@ -498,10 +498,12 @@ def import_altium(sources: list[str] | str, output_dir: str | None = None,
 
 @mcp.tool()
 @tool_result
-def list_symbol_libraries(project_dir: str | None = None) -> dict:
-    """List the symbol libraries available, resolving KiCad's global and project sym-lib-tables."""
-    libs = symbol_index(project_dir).list_libraries()
-    return {"count": len(libs), "libraries": libs}
+def list_symbol_libraries(name: str | None = None, include_paths: bool = False,
+                          limit: int = 200, project_dir: str | None = None) -> dict:
+    """List the symbol libraries available, resolving KiCad's global and project sym-lib-tables. Filter with a glob pattern on the library name (e.g. '*Wurth*', 'Valve'). Names only unless `include_paths` is set."""
+    libs = [lib for lib in symbol_index(project_dir).list_libraries() if _match(lib["name"], name)]
+    items = libs if include_paths else [lib["name"] for lib in libs]
+    return _cap(items, limit)
 
 
 @mcp.tool()

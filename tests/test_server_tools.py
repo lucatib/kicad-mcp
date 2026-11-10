@@ -69,6 +69,15 @@ def test_footprint_tools_are_registered_and_answer():
     assert info["pad_count"] == 4
 
 
+def test_list_symbol_libraries_filters_and_caps():
+    res = server.list_symbol_libraries(name="Valve")
+    assert res["items"] == ["Valve"]
+    assert server.list_symbol_libraries(name="Valve", include_paths=True)["items"][0]["path"]
+    capped = server.list_symbol_libraries(limit=1)
+    assert capped["shown"] == 1
+    assert capped["truncated"] is (capped["count"] > 1)
+
+
 def test_remove_symbols_dry_run_reports_without_writing(sch):
     before = sch.read_text(encoding="utf-8")
     res = server.remove_symbols(str(sch), ["U1"], dry_run=True)
