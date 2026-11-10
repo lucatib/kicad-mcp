@@ -21,7 +21,7 @@ from mcp.server.mcpserver import Image, MCPServer
 
 from . import cli as kcli
 from .altium import importer as _altium_importer
-from . import hierarchy, pcb_common, pcb_file, pcb_live, units
+from . import board_edit, hierarchy, pcb_common, pcb_file, pcb_live, units
 from .discovery import find_install, find_installs
 from .editor import SchematicEditor, add_decoupling_capacitors as _add_decoupling_capacitors
 from .errors import KicadMcpError, NoEditorOpenError
@@ -976,6 +976,148 @@ def add_decoupling_capacitors(
 
 
 # --- escape hatch --------------------------------------------------------
+
+
+# --- building a board -----------------------------------------------------
+
+
+@mcp.tool()
+@tool_result
+def create_library_footprint(project_dir: str, library: str, name: str, pads: list[dict],
+                             description: str = "", tags: str = "",
+                             outline: dict | None = None) -> dict:
+    """Write a footprint of plain pads into a project footprint library, with KiCad closed.
+
+    For parts the stock libraries lack and that need no more than pads in the
+    right places: transformer and choke wire pads, a custom connector, test
+    points. Each pad is {"number", "x", "y", "size", "drill", "shape"} in mm,
+    y pointing down: `size` one number or [x, y]; `drill` 0 or absent makes a
+    surface pad on the front; `shape` circle, rect, oval or roundrect, by
+    default a rectangle for pad "1" and round for the rest. `outline`
+    {"x", "y", "width", "height"} draws the silkscreen box and a courtyard
+    0.25 mm outside it; by default the box around the pads.
+
+    Writes <library>.pretty/<name>.kicad_mod in the project folder and
+    registers a new library in the project's fp-lib-table. Refused, writing
+    nothing: a name the library has, and the nickname of a global library.
+    Use it as footprint "<library>:<name>" in set_symbol_fields.
+    """
+    result = board_edit.create_footprint(install(), project_dir, library, name, pads,
+                                         description=description, tags=tags, outline=outline)
+    _FP_INDEX_CACHE.clear()
+    return result
+
+
+@mcp.tool()
+@tool_result
+def update_board_from_schematic(schematic: str, board: str | None = None) -> dict:
+    """Bring a .kicad_pcb in line with its schematic: KiCad's "Update PCB from Schematic", with KiCad closed.
+
+    `schematic` is the project's root .kicad_sch; `board` defaults to the
+    .kicad_pcb of the same name beside it and is created when missing. Every
+    symbol with a Footprint field gets its footprint, linked to the symbol, and
+    every pad its net. Footprints already there keep their place (matched by
+    symbol, then by reference); one whose Footprint field changed is swapped
+    where it stood; ones whose symbol is gone are removed; new ones are parked
+    in rows below the board for place_footprints. Tracks are left as they are.
+
+    Returns the references added, replaced, updated and removed, plus
+    `without_footprint` (empty Footprint field) and `unresolved` (the field
+    names something no library has) -- those parts are not on the board.
+    A board open in KiCad must be reloaded there (File > Revert) to show it.
+    """
+    return board_edit.update_from_schematic(install(), schematic, board)
+
+
+@mcp.tool()
+@tool_result
+def place_footprints(board: str, placements: list[dict]) -> dict:
+    """Move, turn and flip footprints on a .kicad_pcb, with KiCad closed.
+
+    Each placement is {"reference", "x", "y", "angle", "side"}: `x`/`y` in mm
+    put the footprint's origin there (both or neither), `angle` in degrees
+    counter-clockwise as KiCad shows it, `side` "front" or "back". Returns each
+    footprint's place and its box (pads and graphics, without texts), which is
+    what to check for overlaps. Tracks do not follow a moved footprint.
+    """
+    return board_edit.place_footprints(board, placements)
+
+
+@mcp.tool()
+@tool_result
+def add_board_footprint(board: str, lib_id: str, reference: str, x: float, y: float,
+                        angle: float = 0.0, value: str | None = None) -> dict:
+    """Put a footprint that has no schematic symbol on a .kicad_pcb: a mounting hole, a fiducial, a logo.
+
+    It is marked "not in schematic", so update_board_from_schematic leaves it.
+    `lib_id` is "Library:Name", e.g. "MountingHole:MountingHole_3.2mm_M3".
+    """
+    return board_edit.add_footprint(install(), board, lib_id, reference, x, y, angle=angle, value=value)
+
+
+@mcp.tool()
+@tool_result
+def set_board_outline(board: str, x: float, y: float, width: float, height: float,
+                      corner_radius: float = 0.0) -> dict:
+    """Replace the outline of a .kicad_pcb with a rectangle on Edge.Cuts, in mm, its top left corner at (x, y).
+
+    Every shape on Edge.Cuts goes, cutouts included. `corner_radius` rounds the corners.
+    """
+    return board_edit.set_outline(board, x, y, width, height, corner_radius=corner_radius)
+
+
+@mcp.tool()
+@tool_result
+def set_net_classes(board: str, classes: list[dict]) -> dict:
+    """Define net classes and the nets they take, in the project (.kicad_pro) beside a .kicad_pcb.
+
+    Each class is {"name", "clearance", "track_width", "via_diameter",
+    "via_drill", "nets"}: sizes in mm (absent ones stay as they were, or as
+    Default has them); `nets` a list of net names or globs such as "HV_*" or
+    "/Power supply/*", replacing the patterns the class had. Where two classes
+    claim a net, the one listed first wins. A class named "Default" changes the
+    class of every other net. Classes not named in the call are left alone.
+
+    Returns which nets ended up in which class. route_board and DRC both use
+    these widths and clearances.
+    """
+    return board_edit.set_net_classes(board, classes)
+
+
+@mcp.tool()
+@tool_result
+def route_board(board: str, nets: list[str] | None = None, exclude: list[str] | None = None,
+                first: list[str] | None = None, grid: float = 0.635, via_cost: float = 10.0,
+                layer_cost: list[float] | None = None, allow_vias: bool = True,
+                passes: int = 4, edge_clearance: float | None = None) -> dict:
+    """Autoroute a .kicad_pcb with the built-in grid router, with KiCad closed.
+
+    Tracks get the width of their net class and keep its clearance (the larger
+    of the two classes') from every other net's pads, tracks and vias, and the
+    board's edge clearance from the outline. `nets` and `exclude` are names or
+    globs; tracks the chosen nets have are taken up and routed again, the rest
+    of the board is routed around. Short nets go first unless `first` names the
+    ones to lead. `grid` in mm is the lattice tracks run on, at 45 degree steps:
+    finer finds more ways through and takes longer. `layer_cost` is a cost per
+    copper layer, front first ([3, 1] keeps tracks on the back where it can);
+    `via_cost` is in mm of track; `allow_vias` False changes layer only at
+    through-hole pads.
+
+    It is a maze router that rips up nothing: nets that find no way are
+    reported in `failed` with the pads left off, and a retry pass routes those
+    first. Zones are not seen, and there is no length or differential-pair
+    tuning. Check the result with run_drc.
+    """
+    return board_edit.route(board, nets=nets, exclude=exclude, first=first, grid=grid,
+                            via_cost=via_cost, layer_cost=layer_cost, allow_vias=allow_vias,
+                            passes=passes, edge_clearance=edge_clearance)
+
+
+@mcp.tool()
+@tool_result
+def unroute_board(board: str, nets: list[str] | None = None) -> dict:
+    """Remove tracks and vias from a .kicad_pcb: those of the nets matching `nets` (names or globs), or all of them."""
+    return board_edit.unroute(board, nets)
 
 
 @mcp.tool()
