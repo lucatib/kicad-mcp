@@ -195,7 +195,10 @@ def create_footprint(
     fp.Value().SetLayer(pcbnew.F_Fab)
 
     lib_path.mkdir(parents=True, exist_ok=True)
-    pcbnew.FootprintSave(str(lib_path), fp)
+    # An empty .pretty directory is guessed as another format on KiCad 10.
+    # We are writing native KiCad footprints, so select that plugin explicitly.
+    plugin = pcbnew.PCB_IO_MGR.FindPlugin(pcbnew.PCB_IO_MGR.KICAD_SEXP)
+    plugin.FootprintSave(str(lib_path), fp)
     if register:
         entry = [make("name", library), make("type", "KiCad"),
                  make("uri", f"${{KIPRJMOD}}/{library}.pretty"), make("options", ""), make("descr", "")]
@@ -277,7 +280,8 @@ def _park(pcbnew, board, fresh: list) -> None:
     """Set new footprints in rows under everything the board has, tallest first."""
     if not fresh:
         return
-    placed = [fp for fp in board.GetFootprints() if all(fp is not f for f in fresh)]
+    fresh_ids = {fp.m_Uuid.AsString() for fp in fresh}
+    placed = [fp for fp in board.GetFootprints() if fp.m_Uuid.AsString() not in fresh_ids]
     boxes = [_box(fp) for fp in placed]
     edges = board.GetBoardEdgesBoundingBox()
     if edges.GetWidth() > 0:
@@ -335,14 +339,14 @@ def update_from_schematic(install, schematic: str | Path, board: str | Path | No
                 report["without_footprint"].append(ref)
                 continue
             fp = by_path.get(part["path"]) or by_ref.get(ref)
-            if fp is not None and id(fp) in kept:
+            if fp is not None and fp.m_Uuid.AsString() in kept:
                 fp = None
             if fp is None or str(fp.GetFPIDAsString()) != part["footprint"]:
                 new = _load_library_footprint(pcbnew, index, part["footprint"])
                 if new is None:
                     report["unresolved"].append({"reference": ref, "footprint": part["footprint"]})
                     if fp is not None:
-                        kept.add(id(fp))
+                        kept.add(fp.m_Uuid.AsString())
                     continue
                 pcb.Add(new)
                 if fp is None:
@@ -358,7 +362,7 @@ def update_from_schematic(install, schematic: str | Path, board: str | Path | No
                 fp = new
             elif (str(fp.GetReference()), str(fp.GetValue()), fp.GetPath().AsString()) != (ref, part["value"], part["path"]):
                 report["updated"].append(ref)
-            kept.add(id(fp))
+            kept.add(fp.m_Uuid.AsString())
             fp.SetReference(ref)
             fp.SetValue(part["value"])
             fp.SetPath(pcbnew.KIID_PATH(part["path"]))
@@ -385,7 +389,7 @@ def update_from_schematic(install, schematic: str | Path, board: str | Path | No
                 report["updated"].append(ref)
 
         for fp in list(pcb.GetFootprints()):
-            if id(fp) not in kept and fp.GetPath().AsString():
+            if fp.m_Uuid.AsString() not in kept and fp.GetPath().AsString():
                 report["removed"].append(str(fp.GetReference()))
                 pcb.Remove(fp)
         _park(pcbnew, pcb, fresh)
