@@ -1,5 +1,7 @@
 """Exercise native library creation and SWIG footprint identity on a real board."""
 
+import json
+
 import pytest
 
 from kicad_mcp import board_edit, pcb_file
@@ -43,3 +45,19 @@ def test_sync_keeps_new_footprints_and_their_placement(tmp_path):
     assert fp.GetPosition().x == 80_000_000
     assert fp.GetPosition().y == 60_000_000
     assert fp.GetOrientationDegrees() == 90
+
+
+def test_net_classes_keep_other_classes_patterns(tmp_path):
+    (tmp_path / "test.kicad_pro").write_text("{}")
+    pcbnew = pcb_file._pcbnew()
+    path = tmp_path / "test.kicad_pcb"
+    board = pcbnew.NewBoard(str(path))
+    for name in ("HV", "GND", "SIG"):
+        board.Add(pcbnew.NETINFO_ITEM(board, name))
+    pcbnew.SaveBoard(str(path), board)
+    board_edit.set_net_classes(path, [{"name": "POWER", "nets": ["HV"]},
+                                      {"name": "GROUND", "nets": ["GND"]}])
+    board_edit.set_net_classes(path, [{"name": "POWER", "nets": ["HV", "SIG"]}])
+    project = json.loads((tmp_path / "test.kicad_pro").read_text())
+    patterns = {(r["pattern"], r["netclass"]) for r in project["net_settings"]["netclass_patterns"]}
+    assert patterns == {("HV", "POWER"), ("SIG", "POWER"), ("GND", "GROUND")}

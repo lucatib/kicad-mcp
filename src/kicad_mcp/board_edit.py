@@ -15,6 +15,7 @@ writes it with the board, so it is the one writer here as well.
 from __future__ import annotations
 
 import fnmatch
+import json
 import math
 import tempfile
 import xml.etree.ElementTree as ET
@@ -534,8 +535,10 @@ def set_net_classes(board: str | Path, classes: list[dict]) -> dict:
             if unknown:
                 raise ToolInputError(f"Net class {spec['name']}: unknown keys {sorted(unknown)}.",
                                      remedy=f"Use {', '.join(CLASS_KEYS)}.")
-        kept = [(str(p.GetPattern()) if hasattr(p, "GetPattern") else str(p[0].GetPattern()), str(c))
-                for p, c in _patterns(settings)]
+        kept = _project_patterns(path)
+        if kept is None:
+            kept = [(str(p.GetPattern()) if hasattr(p, "GetPattern") else str(p[0].GetPattern()), str(c))
+                    for p, c in _patterns(settings)]
         kept = [(pattern, cls) for pattern, cls in kept if cls not in names]
         settings.ClearNetclassPatternAssignments()
         setters = {"clearance": "SetClearance", "track_width": "SetTrackWidth",
@@ -567,6 +570,23 @@ def set_net_classes(board: str | Path, classes: list[dict]) -> dict:
                 assigned.setdefault(str(net.GetNetClassName()), []).append(str(net.GetNetname()))
     return {"board": str(path), "project": str(path.with_suffix(".kicad_pro")),
             "classes": {name: sorted(nets) for name, nets in sorted(assigned.items())}}
+
+
+def _project_patterns(board: Path) -> list[tuple[str, str]] | None:
+    """The pattern assignments saved in the project beside the board, or None without one.
+
+    KiCad 10.0.8 hands GetNetclassPatternAssignments back as a bare
+    SwigPyObject, so the project file is the reliable record of them.
+    """
+    try:
+        data = json.loads(board.with_suffix(".kicad_pro").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    rows = (data.get("net_settings") or {}).get("netclass_patterns")
+    if not isinstance(rows, list):
+        return None
+    return [(str(r["pattern"]), str(r["netclass"])) for r in rows
+            if isinstance(r, dict) and "pattern" in r and "netclass" in r]
 
 
 def _patterns(settings) -> list[tuple]:

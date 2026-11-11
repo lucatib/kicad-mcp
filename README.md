@@ -9,8 +9,16 @@ Verified against:
 
 | KiCad | IPC API | `kicad-python` | `mcp` |
 |---|---|---|---|
-| **10.0.7** (latest) | 10.0.6 | 0.8.0 | 2.3.0 |
+| **10.0.8** (latest) | not checked | 0.8.0 | 2.3.0 |
+| 10.0.7 | 10.0.6 | 0.8.0 | 2.3.0 |
 | 10.0.6 | 10.0.1 | 0.7.1 | 2.0.0 |
+
+On 10.0.8 the test suite and the file-based tools were checked on Linux;
+the live PCB tools were not, because no PCB editor was connected. In this
+build `GetNetclassPatternAssignments()` comes back as a bare `SwigPyObject`.
+`set_net_classes` used to read the existing assignments from it, got
+nothing, and dropped the patterns of every class it was not given. It now
+reads them from the `.kicad_pro` file.
 
 ## Why a venv built from KiCad's own Python
 
