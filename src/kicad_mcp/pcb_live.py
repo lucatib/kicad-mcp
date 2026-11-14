@@ -276,3 +276,139 @@ def zones(board) -> list[dict]:
         }
         for zone in board.get_zones()
     ]
+
+
+# --- edits -----------------------------------------------------------------
+# The editing counterparts of board_edit's file functions, for the board open
+# in KiCad: each call is one undo step there.
+
+
+def _commit(board, message: str, change) -> None:
+    commit = board.begin_commit()
+    try:
+        change()
+    except BaseException:
+        board.drop_commit(commit)
+        raise
+    board.push_commit(commit, message)
+
+
+def _layer(name: str):
+    from kipy.proto.board.board_types_pb2 import BoardLayer
+    return BoardLayer.Value("BL_" + name.replace(".", "_"))
+
+
+def file_path(board) -> str | None:
+    """Where the open board is saved, or None when that cannot be told."""
+    try:
+        import os
+        return os.path.join(board.get_project().path, board.name)
+    except Exception:  # noqa: BLE001 - older KiCad without project info
+        return None
+
+
+def apply_route(board, removed: list[str], tracks: list[tuple], vias: list[tuple]) -> None:
+    """Take up the tracks with ids in `removed`, lay `tracks` (net, layer name,
+    x1, y1, x2, y2, width) and `vias` (net, x, y, diameter, drill), in mm."""
+    from kipy.board_types import Track, Via
+    from kipy.geometry import Vector2
+
+    nets = {n.name: n for n in board.get_nets()}
+    gone = set(removed)
+    old = [t for t in list(board.get_tracks()) + list(board.get_vias()) if t.id.value in gone]
+    new = []
+    for net, layer, x1, y1, x2, y2, width in tracks:
+        t = Track()
+        t.start, t.end = Vector2.from_xy_mm(x1, y1), Vector2.from_xy_mm(x2, y2)
+        t.width = units.mm_to_nm(width)
+        t.layer = _layer(layer)
+        t.net = nets[net]
+        new.append(t)
+    for net, x, y, diameter, drill in vias:
+        v = Via()
+        v.position = Vector2.from_xy_mm(x, y)
+        v.diameter, v.drill_diameter = units.mm_to_nm(diameter), units.mm_to_nm(drill)
+        v.net = nets[net]
+        new.append(v)
+
+    def change():
+        if old:
+            board.remove_items(old)
+        if new:
+            board.create_items(new)
+    _commit(board, "Autoroute", change)
+
+
+def unroute(board, nets: list[str] | None = None) -> int:
+    """Remove the tracks and vias of the nets matching `nets`, or all; returns how many."""
+    import fnmatch
+    items = [t for t in list(board.get_tracks()) + list(board.get_vias())
+             if nets is None or any(fnmatch.fnmatchcase(t.net.name, n) for n in nets)]
+    if items:
+        _commit(board, "Unroute", lambda: board.remove_items(items))
+    return len(items)
+
+
+def _pad_points(fp) -> dict[str, tuple[int, int, str]]:
+    return {f"{i}:{p.number}": (p.position.x, p.position.y, p.net.name)
+            for i, p in enumerate(fp.definition.pads)}
+
+
+def place(board, placements: list[dict], drag_tracks: bool = False) -> tuple[list[dict], int]:
+    """Move, turn and flip footprints: see board_edit.place_footprints. Returns the
+    rows and how many tracks were dragged."""
+    from kipy.geometry import Angle, Vector2
+    from kipy.proto.board.board_types_pb2 import BoardLayer
+
+    found = {_ref(fp): fp for fp in board.get_footprints()}
+    rows, moves = [], []
+
+    def change():
+        for spec in placements:
+            ref = spec["reference"]
+            fp = found.get(ref) or next((f for r, f in found.items() if r.lower() == str(ref).lower()), None)
+            if fp is None:
+                raise ValueError(f"No footprint {ref!r} on the board.")
+            before = _pad_points(fp)
+            side = spec.get("side")
+            if side is not None and (side == "back") != (fp.layer == BoardLayer.BL_B_Cu):
+                fp = board.flip_items([fp])[0]
+            if "angle" in spec:
+                fp.orientation = Angle.from_degrees(float(spec["angle"]))
+            if "x" in spec:
+                fp.position = Vector2.from_xy_mm(float(spec["x"]), float(spec["y"]))
+            fp = board.update_items([fp])[0]
+            moves.append((before, _pad_points(fp)))
+            rows.append({"reference": _ref(fp), **units.point_to_mm(fp.position),
+                         "angle": units.angle_to_deg(fp.orientation),
+                         "side": "back" if fp.layer == BoardLayer.BL_B_Cu else "front"})
+        if drag_tracks:
+            dragged.append(_drag(board, moves))
+
+    dragged: list[int] = []
+    _commit(board, "Place footprints", change)
+    return rows, sum(dragged)
+
+
+def _drag(board, moves) -> int:
+    """Bring track ends that sat on a moved pad to where the pad is now."""
+    from kipy.geometry import Vector2
+    shift = {}
+    for before, after in moves:
+        for key, (x, y, net) in before.items():
+            if key in after:
+                shift[(x, y, net)] = after[key][:2]
+    changed = []
+    for t in board.get_tracks():
+        hit = False
+        for end in ("start", "end"):
+            p = getattr(t, end)
+            to = shift.get((p.x, p.y, t.net.name))
+            if to is not None and to != (p.x, p.y):
+                setattr(t, end, Vector2.from_xy(*to))
+                hit = True
+        if hit:
+            changed.append(t)
+    if changed:
+        board.update_items(changed)
+    return len(changed)

@@ -58,6 +58,8 @@ class Shape:
     geometry: tuple
     layers: tuple[int, ...]
     net: str | None = None
+    #: What the copper belongs to, for a Policy that asks more than net classes.
+    tag: object = field(default=None, compare=False)
 
     def distance(self, px: float, py: float) -> float:
         """From a point to the copper's edge; negative inside it."""
@@ -93,6 +95,38 @@ class Pad:
     x: float
     y: float
     shape: Shape
+    #: Pads of one net with the same group are joined already, by copper the
+    #: router keeps: reaching one of them reaches them all. None: on its own.
+    group: object = None
+
+
+class Policy:
+    """What a net's tracks must keep to. This one asks only the net classes:
+    the larger of the two classes' clearances, one edge clearance, any layer,
+    vias where `allow_vias`. Board rules subclass it (board_edit)."""
+
+    def __init__(self, rules: dict[str, Rule] | None = None, default_rule: Rule = Rule(),
+                 edge_clearance: float = 0.5, allow_vias: bool = True) -> None:
+        self.rules = rules or {}
+        self.default_rule = default_rule
+        self.edge_clearance = edge_clearance
+        self.allow_vias = allow_vias
+
+    def rule(self, net: str | None) -> Rule:
+        return self.rules.get(net, self.default_rule) if net else self.default_rule
+
+    def clearance(self, net: str, shape: Shape) -> float:
+        """Between a track of `net` and `shape`, another net's copper or a hole."""
+        return max(self.rule(net).clearance, self.rule(shape.net).clearance)
+
+    def edge(self, net: str) -> float:
+        return self.edge_clearance
+
+    def layer_ok(self, net: str, layer: int) -> bool:
+        return True
+
+    def vias(self, net: str) -> bool:
+        return self.allow_vias
 
 
 @dataclass
@@ -172,31 +206,29 @@ def _pieces(shape: Shape, longest: float) -> list[Shape]:
     n = max(1, math.ceil(math.hypot(x2 - x1, y2 - y1) / longest))
     return [Shape("capsule", (x1 + (x2 - x1) * i / n, y1 + (y2 - y1) * i / n,
                               x1 + (x2 - x1) * (i + 1) / n, y1 + (y2 - y1) * (i + 1) / n, r),
-                  shape.layers, shape.net) for i in range(n)]
+                  shape.layers, shape.net, shape.tag) for i in range(n)]
 
 
 class _Router:
-    def __init__(self, bounds, pads, obstacles, rules, default_rule, grid, layers,
-                 edge_clearance, via_cost, layer_cost, allow_vias) -> None:
+    def __init__(self, bounds, pads, obstacles, policy: Policy, grid, layers,
+                 via_cost, layer_cost) -> None:
         self.lattice = _Lattice(bounds, grid, layers)
         self.pads = pads
         self.fixed = list(obstacles) + [p.shape for p in pads]
-        self.rules = rules
-        self.default_rule = default_rule
-        self.edge_clearance = edge_clearance
+        self.policy = policy
         self.via_cost = via_cost
         self.layer_cost = layer_cost
-        self.allow_vias = allow_vias and layers > 1
+        self.layers = layers
 
     def rule(self, net: str | None) -> Rule:
-        return self.rules.get(net, self.default_rule) if net else self.default_rule
+        return self.policy.rule(net)
 
     def run(self, order: list[str]) -> Result:
         result = Result()
         copper: list[Shape] = []        # what this pass has laid down
         for net in order:
             pads = [p for p in self.pads if p.net == net]
-            if len(pads) < 2:
+            if _joins(pads) < 1:
                 continue
             self._route_net(net, pads, copper, result)
         return result
@@ -205,26 +237,30 @@ class _Router:
 
     def _masks(self, net: str, copper: list[Shape]):
         """Per layer, where a track of `net` may not be centred; and where a via may not."""
-        lat, rule = self.lattice, self.rule(net)
+        lat, rule, policy = self.lattice, self.rule(net), self.policy
         size = lat.nx * lat.ny
         tracks = [bytearray(size) for _ in range(lat.layers)]
-        vias = bytearray(size) if self.allow_vias else None
+        vias = bytearray(size) if self.layers > 1 and policy.vias(net) else None
         # Between two nodes a track dips closer to a corner than at either
         # node; asking a little more at the nodes covers the dip exactly.
         sag = (lat.grid * SQRT2 / 2) ** 2
-        for mask in tracks:
-            lat.block_edge(mask, self.edge_clearance + rule.width / 2)
+        allowed = [policy.layer_ok(net, layer) for layer in range(lat.layers)]
+        for layer, mask in enumerate(tracks):
+            if allowed[layer]:
+                lat.block_edge(mask, policy.edge(net) + rule.width / 2)
+            else:
+                mask[:] = b"\x01" * size
         if vias is not None:
-            lat.block_edge(vias, self.edge_clearance + rule.via_diameter / 2)
+            lat.block_edge(vias, policy.edge(net) + rule.via_diameter / 2)
         for shape in self.fixed + copper:
             if shape.net == net:
                 continue
-            gap = max(rule.clearance, self.rule(shape.net).clearance)
+            gap = policy.clearance(net, shape)
             need = gap + rule.width / 2
             reach = math.sqrt(need * need + sag)
             for piece in _pieces(shape, 8 * lat.grid):
                 for layer in piece.layers:
-                    if layer < lat.layers:
+                    if layer < lat.layers and allowed[layer]:
                         lat.block(tracks[layer], piece, reach)
                 if vias is not None:
                     lat.block(vias, piece, gap + rule.via_diameter / 2)
@@ -238,7 +274,7 @@ class _Router:
         for shape in self.fixed + copper:
             if shape.net == net or layer not in shape.layers:
                 continue
-            need = max(rule.clearance, self.rule(shape.net).clearance) + rule.width / 2
+            need = self.policy.clearance(net, shape) + rule.width / 2
             bx0, by0, bx1, by1 = shape.bounds()
             if (max(x1, x2) < bx0 - need or min(x1, x2) > bx1 + need
                     or max(y1, y2) < by0 - need or min(y1, y2) > by1 + need):
@@ -256,7 +292,8 @@ class _Router:
         lat = self.lattice
         ix, iy = lat.nearest(pad.x, pad.y)
         out: dict[tuple[int, int], tuple | None] = {}
-        layers = [layer for layer in pad.shape.layers if layer < lat.layers]
+        layers = [layer for layer in pad.shape.layers
+                  if layer < lat.layers and self.policy.layer_ok(net, layer)]
         if lat.inside(ix, iy):
             nx, ny = lat.xy(ix, iy)
             if math.hypot(nx - pad.x, ny - pad.y) <= ON_NODE:
@@ -277,20 +314,18 @@ class _Router:
     def _route_net(self, net: str, pads: list[Pad], copper: list[Shape], result: Result) -> None:
         lat, rule = self.lattice, self.rule(net)
         tracks, vias = self._masks(net, copper)
-        entries = {p.name: self._entries(net, p, tracks, copper) for p in pads}
+        entries = [self._entries(net, p, tracks, copper) for p in pads]
         # A through-hole pad on a node joins its layers there at no cost.
         free_change = set()
-        for p in pads:
-            nodes = entries[p.name]
+        for nodes in entries:
             if len(nodes) > 1 and all(stub is None for stub in nodes.values()):
                 free_change.update(index for _, index in nodes)
 
-        cx = sum(p.x for p in pads) / len(pads)
-        cy = sum(p.y for p in pads) / len(pads)
-        first = min(pads, key=lambda p: math.hypot(p.x - cx, p.y - cy))
-        tree: dict[tuple[int, int], tuple | None] = dict(entries[first.name])
-        waiting = [p for p in pads if p is not first]
-        drawn: set[tuple] = set()
+        # Pads already joined by kept copper travel together.
+        groups: dict[object, list[int]] = {}
+        for i, p in enumerate(pads):
+            groups.setdefault(("pad", i) if p.group is None else ("group", p.group), []).append(i)
+        members = list(groups.values())
         new: list[Shape] = []
 
         def lay(layer, x1, y1, x2, y2):
@@ -299,52 +334,97 @@ class _Router:
             result.tracks.append((net, layer, round(x1, 6), round(y1, 6), round(x2, 6), round(y2, 6)))
             new.append(Shape("capsule", (x1, y1, x2, y2, rule.width / 2), (layer,), net))
 
-        def stub(node):
-            line = tree.get(node)
-            if line is not None and (node, line) not in drawn:
-                drawn.add((node, line))
-                lay(node[0], *line)
+        def grow(seed: int, waiting: list[int]) -> list[int]:
+            """Join what can be reached from group `seed`; return the groups that cannot."""
+            tree: dict[tuple[int, int], tuple | None] = {}
+            for i in members[seed]:
+                tree.update(entries[i])
+            drawn: set[tuple] = set()
 
-        while waiting:
-            targets: dict[tuple[int, int], Pad] = {}
-            for p in waiting:
-                for node in entries[p.name]:
-                    targets.setdefault(node, p)
-            path = self._search(tree, targets, waiting, tracks, vias, free_change) if targets else None
-            if path is None:
-                # Whatever is left cannot reach the tree; nor, mostly, each other.
-                result.failed.extend((net, p.name) for p in waiting)
+            def stub(node):
+                line = tree.get(node)
+                if line is not None and (node, line) not in drawn:
+                    drawn.add((node, line))
+                    lay(node[0], *line)
+
+            waiting = list(waiting)
+            while waiting:
+                targets: dict[tuple[int, int], tuple[int, int]] = {}
+                for g in waiting:
+                    for i in members[g]:
+                        for node in entries[i]:
+                            targets.setdefault(node, (g, i))
+                boxes = [_box([pads[i] for i in members[g]]) for g in waiting]
+                path = self._search(tree, targets, boxes, tracks, vias, free_change) if targets else None
+                if path is None:
+                    return waiting
+                g, i = targets[path[-1]]
+                waiting.remove(g)
+                stub(path[0])
+                for a, b in self._runs(path):
+                    if a[0] != b[0]:
+                        if a[1] not in free_change:
+                            x, y = lat.xy(a[1] % lat.nx, a[1] // lat.nx)
+                            result.vias.append((net, round(x, 6), round(y, 6)))
+                            new.append(Shape("circle", (x, y, rule.via_diameter / 2),
+                                             tuple(range(lat.layers)), net))
+                        continue
+                    lay(a[0], *lat.xy(a[1] % lat.nx, a[1] // lat.nx), *lat.xy(b[1] % lat.nx, b[1] // lat.nx))
+                for node in path:
+                    tree.setdefault(node, None)
+                tree[path[-1]] = entries[i].get(path[-1])
+                stub(path[-1])
+                for j in members[g]:
+                    for node, line in entries[j].items():
+                        tree.setdefault(node, line)
+            return []
+
+        # Start from the pad nearest the middle, or the kept copper around it.
+        cx = sum(p.x for p in pads) / len(pads)
+        cy = sum(p.y for p in pads) / len(pads)
+        nearest = min(range(len(pads)), key=lambda i: math.hypot(pads[i].x - cx, pads[i].y - cy))
+        seed = next(g for g, ms in enumerate(members) if nearest in ms)
+        if any(p.group is not None for p in pads):
+            seed = max(range(len(members)), key=lambda g: len(members[g]))
+        left = [g for g in range(len(members)) if g != seed]
+        parts = [[seed]]
+        while left:
+            stuck = grow(seed, left)
+            parts[-1].extend(g for g in left if g not in stuck)
+            if not stuck:
                 break
-            reached = targets[path[-1]]
-            waiting.remove(reached)
-            stub(path[0])
-            for a, b in self._runs(path):
-                if a[0] != b[0]:
-                    if a[1] not in free_change:
-                        x, y = lat.xy(a[1] % lat.nx, a[1] // lat.nx)
-                        result.vias.append((net, round(x, 6), round(y, 6)))
-                        new.append(Shape("circle", (x, y, rule.via_diameter / 2),
-                                         tuple(range(lat.layers)), net))
+            # What is left cannot reach this part; join what it can among itself.
+            seed = max(stuck, key=lambda g: len(members[g]))
+            left = [g for g in stuck if g != seed]
+            parts.append([seed])
+        if len(parts) > 1:
+            # The part with the most real pads is the net; the rest failed.
+            # Points on kept copper are named "~...".
+            main = max(parts, key=lambda part: sum(
+                1 for g in part for i in members[g] if not pads[i].name.startswith("~")))
+            for part in parts:
+                if part is main:
                     continue
-                lay(a[0], *lat.xy(a[1] % lat.nx, a[1] // lat.nx), *lat.xy(b[1] % lat.nx, b[1] // lat.nx))
-            for node in path:
-                tree.setdefault(node, None)
-            for node, line in entries[reached.name].items():
-                tree[node] = line
-            stub(path[-1])
+                for g in part:
+                    named = [pads[i].name for i in members[g] if not pads[i].name.startswith("~")]
+                    result.failed.append((net, ", ".join(named[:4]) or pads[members[g][0]].name))
         copper.extend(new)
 
-    def _search(self, tree, targets, waiting, tracks, vias, free_change):
-        """The cheapest path from the tree to a target node, as [(layer, index)]."""
+    def _search(self, tree, targets, boxes, tracks, vias, free_change):
+        """The cheapest path from the tree to a target node, as [(layer, index)].
+
+        `boxes` hold the targets, (x0, y0, x1, y1) in mm, for the estimate."""
         lat = self.lattice
         nx, grid = lat.nx, lat.grid
-        goals = [((p.x - lat.x0) / grid, (p.y - lat.y0) / grid) for p in waiting]
+        goals = [((x0 - lat.x0) / grid, (y0 - lat.y0) / grid, (x1 - lat.x0) / grid, (y1 - lat.y0) / grid)
+                 for x0, y0, x1, y1 in boxes]
 
         def bound(index: int) -> float:
             ix, iy = index % nx, index // nx
             best = math.inf
-            for gx, gy in goals:
-                dx, dy = abs(gx - ix), abs(gy - iy)
+            for gx0, gy0, gx1, gy1 in goals:
+                dx = max(gx0 - ix, 0.0, ix - gx1)
+                dy = max(gy0 - iy, 0.0, iy - gy1)
                 d = max(dx, dy) + (SQRT2 - 1) * min(dx, dy)
                 if d < best:
                     best = d
@@ -432,6 +512,16 @@ def _span(pads: list[Pad]) -> float:
     return (max(xs) - min(xs)) + (max(ys) - min(ys))
 
 
+def _box(pads: list[Pad]) -> tuple[float, float, float, float]:
+    xs, ys = [p.x for p in pads], [p.y for p in pads]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _joins(pads: list[Pad]) -> int:
+    """How many connections a net still needs: one fewer than its groups."""
+    return len({("pad", i) if p.group is None else ("group", p.group) for i, p in enumerate(pads)}) - 1
+
+
 def route(
     bounds: tuple[float, float, float, float],
     pads: list[Pad],
@@ -446,6 +536,7 @@ def route(
     layer_cost: tuple[float, ...] | None = None,
     allow_vias: bool = True,
     passes: int = 4,
+    policy: Policy | None = None,
 ) -> Result:
     """Route `nets` (all nets with two pads or more when None), first to last.
 
@@ -454,18 +545,21 @@ def route(
     `obstacles` any other copper or hole, with `net` None for what belongs to
     no net. `via_cost` is the track length in mm a via is worth; `layer_cost`
     weighs a mm of track on each layer. Without `nets` the short nets go first.
+    Pads sharing a `group` are joined already and are connected as one.
+    `policy` replaces `rules`, `default_rule`, `edge_clearance` and
+    `allow_vias` with whatever a board's own rules ask.
     """
-    rules = rules or {}
+    if policy is None:
+        policy = Policy(rules, default_rule, edge_clearance, allow_vias)
     by_net: dict[str, list[Pad]] = {}
     for p in pads:
         by_net.setdefault(p.net, []).append(p)
     if nets is None:
-        order = sorted((n for n, ps in by_net.items() if len(ps) > 1), key=lambda n: (_span(by_net[n]), n))
+        order = sorted((n for n, ps in by_net.items() if _joins(ps) > 0), key=lambda n: (_span(by_net[n]), n))
     else:
-        order = [n for n in dict.fromkeys(nets) if len(by_net.get(n, ())) > 1]
+        order = [n for n in dict.fromkeys(nets) if _joins(by_net.get(n, [])) > 0]
     layer_cost = tuple(layer_cost) if layer_cost else (1.0,) * layers
-    router = _Router(bounds, list(pads), list(obstacles), rules, default_rule, grid, layers,
-                     edge_clearance, via_cost, layer_cost, allow_vias)
+    router = _Router(bounds, list(pads), list(obstacles), policy, grid, layers, via_cost, layer_cost)
 
     best: Result | None = None
     for attempt in range(max(1, passes)):

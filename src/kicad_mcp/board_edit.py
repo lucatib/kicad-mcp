@@ -5,8 +5,8 @@ one: the schematic's parts and nets onto a board (what KiCad's "Update PCB
 from Schematic" does, which kicad-cli does not offer), footprints to their
 places, the outline, net classes, and tracks from `autoroute`. Every function
 loads the file, changes it and saves it, so each call leaves a board KiCad
-opens; nothing here reaches a running KiCad, which keeps its own copy until
-the file is reloaded there.
+opens. `route_live` plans on a copy of the board open in KiCad and hands the
+tracks to pcb_live, which applies them there.
 
 Net classes live in the project file beside the board. pcbnew reads and
 writes it with the board, so it is the one writer here as well.
@@ -21,7 +21,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from . import autoroute, cli as kcli, hierarchy, pcb_file, sexpr
+from . import autoroute, cli as kcli, drc_rules, hierarchy, pcb_file, pcb_live, sexpr
 from .errors import ToolInputError
 from .footprints import SUFFIX, FootprintIndex
 from .library import _before_close, _inline, _parse, _read, _usable
@@ -416,21 +416,28 @@ def update_from_schematic(install, schematic: str | Path, board: str | Path | No
 # --- placement and outline -----------------------------------------------
 
 
-def place_footprints(board: str | Path, placements: list[dict]) -> dict:
+def _pad_points(fp) -> dict[str, tuple[int, int, str]]:
+    return {f"{i}:{p.GetNumber()}": (p.GetPosition().x, p.GetPosition().y, str(p.GetNetname()))
+            for i, p in enumerate(fp.Pads())}
+
+
+def place_footprints(board: str | Path, placements: list[dict], drag_tracks: bool = False) -> dict:
     """Move footprints: each {"reference", "x", "y", "angle", "side"}, in mm and degrees.
 
     `x`/`y` put the footprint's origin there; leave both out to keep it.
     `angle` is counter-clockwise as KiCad shows it; `side` front or back.
-    Tracks do not follow.
+    With `drag_tracks`, a track end on one of the footprint's pads moves with
+    the pad; otherwise tracks stay where they are.
     """
     with pcb_file._LOCK:
         pcbnew, pcb, path = _open(board)
-        rows = []
+        rows, shift = [], {}
         for i, spec in enumerate(placements):
             if "reference" not in spec:
                 raise ToolInputError(f"Placement {i + 1} has no reference.",
                                      remedy='Each needs "reference" and any of "x"/"y", "angle", "side".')
             fp = _find(pcb, spec["reference"])
+            before = _pad_points(fp)
             side = spec.get("side")
             if side is not None:
                 if side not in ("front", "back"):
@@ -445,6 +452,8 @@ def place_footprints(board: str | Path, placements: list[dict]) -> dict:
                                      remedy="Pass both, or neither to keep the position.")
             if "x" in spec:
                 fp.SetPosition(_pt(pcbnew, spec["x"], spec["y"]))
+            after = _pad_points(fp)
+            shift.update({v: after[k][:2] for k, v in before.items() if k in after})
             x0, y0, x1, y1 = _box(fp)
             rows.append({
                 "reference": str(fp.GetReference()),
@@ -453,8 +462,24 @@ def place_footprints(board: str | Path, placements: list[dict]) -> dict:
                 "side": "back" if fp.IsFlipped() else "front",
                 "box": {"x": x0, "y": y0, "width": round(x1 - x0, 4), "height": round(y1 - y0, 4)},
             })
+        dragged = 0
+        if drag_tracks:
+            for track in pcb.GetTracks():
+                if _is_via(pcbnew, track):
+                    continue
+                hit = False
+                for get, put in ((track.GetStart, track.SetStart), (track.GetEnd, track.SetEnd)):
+                    p = get()
+                    to = shift.get((p.x, p.y, str(track.GetNetname())))
+                    if to is not None and to != (p.x, p.y):
+                        put(pcbnew.VECTOR2I(*to))
+                        hit = True
+                dragged += hit
         _save(pcbnew, pcb, path)
-    return {"board": str(path), "placed": rows}
+    out = {"board": str(path), "placed": rows}
+    if drag_tracks:
+        out["tracks_dragged"] = dragged
+    return out
 
 
 def add_footprint(install, board: str | Path, lib_id: str, reference: str, x: float, y: float,
@@ -643,6 +668,249 @@ def unroute(board: str | Path, nets: list[str] | None = None) -> dict:
     return {"board": str(path), "removed": gone}
 
 
+_PAD_TYPES = {"PAD_ATTRIB_PTH": "Through-hole", "PAD_ATTRIB_SMD": "SMD",
+              "PAD_ATTRIB_CONN": "Edge connector", "PAD_ATTRIB_NPTH": "NPTH, mechanical"}
+
+
+class _BoardPolicy(autoroute.Policy):
+    """The net classes, then the board's custom rules (.kicad_dru) over them."""
+
+    def __init__(self, rules, default_rule, edge_clearance, allow_vias, dru: drc_rules.Rules,
+                 netclass_of: dict[str, str], layer_names: dict[int, str],
+                 min_clearance: float, hole_clearance: float) -> None:
+        super().__init__(rules, default_rule, edge_clearance, allow_vias)
+        self.dru = dru
+        self.netclass_of = netclass_of
+        self.layer_names = layer_names
+        self.min_clearance = min_clearance
+        self.hole_clearance = hole_clearance
+        self._rules: dict = {}
+        self._gaps: dict = {}
+
+    def _item(self, kind: str, net: str | None, layer: str | None = None) -> drc_rules.Item:
+        return drc_rules.Item(kind, net or "", self.netclass_of.get(net or "", ""), layer)
+
+    def rule(self, net):
+        if net not in self._rules:
+            base = super().rule(net)
+            track = self._item("Track", net)
+            opt = self.dru.value("track_width", track, bound="opt")
+            low = self.dru.value("track_width", track, bound="min")
+            width = opt if opt is not None else max(base.width, low or 0.0)
+            self._rules[net] = autoroute.Rule(width, base.clearance, base.via_diameter, base.via_drill)
+        return self._rules[net]
+
+    def clearance(self, net, shape):
+        layer = self.layer_names.get(shape.layers[0]) if len(shape.layers) == 1 else None
+        other = shape.tag if isinstance(shape.tag, drc_rules.Item) else self._item("Track", shape.net, layer)
+        key = (net, other)
+        if key not in self._gaps:
+            track = self._item("Track", net, layer)
+            if other.pad_type == "NPTH, mechanical":
+                v = self.dru.value("hole_clearance", track, other)
+                gap = self.hole_clearance if v is None else v
+            else:
+                v = self.dru.value("clearance", track, other)
+                gap = super().clearance(net, shape) if v is None else v
+                phys = self.dru.value("physical_clearance", track, other)
+                gap = max(gap, phys or 0.0, self.min_clearance)
+            self._gaps[key] = gap
+        return self._gaps[key]
+
+    def edge(self, net):
+        v = self.dru.value("edge_clearance", self._item("Track", net))
+        return self.edge_clearance if v is None else v
+
+    def layer_ok(self, net, layer):
+        return not self.dru.disallowed("track", self._item("Track", net, self.layer_names.get(layer)))
+
+    def vias(self, net):
+        return self.allow_vias and not self.dru.disallowed("via", self._item("Via", net))
+
+
+def _islands(shapes: list[autoroute.Shape], ends: list[list[tuple]]) -> list[int]:
+    """For copper of one net, which pieces touch: a group number per shape.
+
+    `ends[i]` are the points of shape i that join whatever copper holds them:
+    a track's two ends, a pad's or a via's centre."""
+    parent = list(range(len(shapes)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i, points in enumerate(ends):
+        for x, y in points:
+            for j, other in enumerate(shapes):
+                if j != i and set(shapes[i].layers) & set(other.layers) and other.distance(x, y) <= 0.001:
+                    parent[find(i)] = find(j)
+    return [find(i) for i in range(len(shapes))]
+
+
+def _kept_points(net: str, group, shape: autoroute.Shape, grid: float) -> list[autoroute.Pad]:
+    """Lattice nodes on a kept track, where a new track may join it."""
+    x1, y1, x2, y2, r = shape.geometry
+    n = max(1, math.ceil(math.hypot(x2 - x1, y2 - y1) / (grid / 2)))
+    seen, out = set(), []
+    for i in range(n + 1):
+        x, y = x1 + (x2 - x1) * i / n, y1 + (y2 - y1) * i / n
+        node = (round(x / grid), round(y / grid))
+        if node in seen:
+            continue
+        seen.add(node)
+        nx, ny = node[0] * grid, node[1] * grid
+        if shape.distance(nx, ny) <= 0:
+            out.append(autoroute.Pad(net, f"~{net}", nx, ny,
+                                     autoroute.Shape("circle", (nx, ny, 0.001), shape.layers, net), group))
+    return out
+
+
+def _plan_route(pcbnew, pcb, dru_path: Path | None, nets, exclude, first, grid, via_cost, layer_cost,
+                allow_vias, passes, edge_clearance, keep_existing):
+    """Route `pcb` in memory. Returns (report, tracks, vias, taken-up tracks)."""
+    if grid <= 0:
+        raise ToolInputError("The routing grid must be positive.", remedy="Try 0.635 or 0.5 mm.")
+    edges = pcb.GetBoardEdgesBoundingBox()
+    if edges.GetWidth() <= 0 or edges.GetHeight() <= 0:
+        raise ToolInputError("The board has no outline, so there is no area to route in.",
+                             remedy="Draw one with set_board_outline first.")
+    bounds = (_mm(edges.GetLeft()), _mm(edges.GetTop()), _mm(edges.GetRight()), _mm(edges.GetBottom()))
+    index = _copper_index(pcbnew, pcb)
+    every = tuple(range(len(index)))
+    settings = pcb.GetDesignSettings()
+    if edge_clearance is None:
+        edge_clearance = _mm(settings.m_CopperEdgeClearance)
+
+    # Net classes through NET_SETTINGS: NETINFO_ITEM.GetNetClass() comes back
+    # as a bare SwigPyObject in KiCad 10's bindings.
+    net_settings = settings.m_NetSettings
+    rules, netclass_of = {}, {}
+    for net in pcb.GetNetsByName().values():
+        if net.GetNetCode() > 0:
+            name = str(net.GetNetname())
+            nc = net_settings.GetEffectiveNetClass(name)
+            rules[name] = _rule(nc)
+            netclass_of[name] = str(nc.GetName())
+    default_rule = _rule(net_settings.GetDefaultNetclass())
+    dru = drc_rules.load(dru_path) if dru_path else drc_rules.Rules()
+    layer_names = {i: str(pcb.GetLayerName(layer)) for layer, i in index.items()}
+    policy = _BoardPolicy(rules, default_rule, edge_clearance, allow_vias, dru, netclass_of, layer_names,
+                          _mm(settings.m_MinClearance), _mm(settings.m_HoleClearance))
+
+    pads, holes = [], []
+    for fp in pcb.GetFootprints():
+        ref = str(fp.GetReference())
+        for pad in fp.Pads():
+            net = str(pad.GetNetname())
+            through = pad.GetAttribute() in (pcbnew.PAD_ATTRIB_PTH, pcbnew.PAD_ATTRIB_NPTH)
+            layers = every if through else tuple(
+                i for layer, i in index.items() if pad.IsOnLayer(layer))
+            shape = _pad_shape(pcbnew, pad, layers)
+            kind = next((v for k, v in _PAD_TYPES.items() if getattr(pcbnew, k, None) == pad.GetAttribute()), "")
+            tag = drc_rules.Item("Pad", net, netclass_of.get(net, ""), None, ref, kind)
+            shape = autoroute.Shape(shape.kind, shape.geometry, shape.layers, shape.net, tag)
+            if net and layers and pad.GetAttribute() != pcbnew.PAD_ATTRIB_NPTH:
+                pos = pad.GetPosition()
+                pads.append(autoroute.Pad(net, f"{ref}.{pad.GetNumber()}", _mm(pos.x), _mm(pos.y), shape))
+            else:
+                holes.append(shape)
+
+    names = sorted({p.net for p in pads})
+    chosen = [n for n in names
+              if (nets is None or any(fnmatch.fnmatchcase(n, g) for g in nets))
+              and not any(fnmatch.fnmatchcase(n, g) for g in exclude or [])]
+    if nets and not chosen:
+        raise ToolInputError(f"No net on the board matches {nets}.",
+                             remedy="Call list_nets for the names; sheet nets start with '/'.")
+
+    taken_up, fixed, kept = [], list(holes), {}
+    for track in list(pcb.GetTracks()):
+        net = str(track.GetNetname())
+        if net in chosen and not keep_existing:
+            taken_up.append(track)
+            continue
+        nc = netclass_of.get(net, "")
+        if _is_via(pcbnew, track):
+            pos = track.GetPosition()
+            shape = autoroute.Shape("circle", (_mm(pos.x), _mm(pos.y), _mm(track.GetWidth(pcbnew.F_Cu)) / 2),
+                                    every, net or None, drc_rules.Item("Via", net, nc))
+            ends = [(_mm(pos.x), _mm(pos.y))]
+        elif track.GetLayer() in index:
+            a, b = track.GetStart(), track.GetEnd()
+            shape = autoroute.Shape("capsule", (_mm(a.x), _mm(a.y), _mm(b.x), _mm(b.y), _mm(track.GetWidth()) / 2),
+                                    (index[track.GetLayer()],), net or None,
+                                    drc_rules.Item("Track", net, nc, layer_names[index[track.GetLayer()]]))
+            ends = [(_mm(a.x), _mm(a.y)), (_mm(b.x), _mm(b.y))]
+        else:
+            continue
+        fixed.append(shape)
+        if net in chosen:
+            kept.setdefault(net, []).append((shape, ends))
+
+    # Kept copper joins pads into groups; points on it are where new tracks may land.
+    if keep_existing:
+        for net, pieces in kept.items():
+            own = [p for p in pads if p.net == net]
+            shapes = [p.shape for p in own] + [s for s, _ in pieces]
+            ends = [[(p.x, p.y)] for p in own] + [e for _, e in pieces]
+            group = _islands(shapes, ends)
+            sizes = {g: group.count(g) for g in group}
+            for k, p in enumerate(own):
+                if sizes[group[k]] > 1:
+                    pads[pads.index(p)] = autoroute.Pad(p.net, p.name, p.x, p.y, p.shape, (net, group[k]))
+            for k, (shape, _) in enumerate(pieces):
+                g = (net, group[len(own) + k])
+                if shape.kind == "capsule":
+                    pads.extend(_kept_points(net, g, shape, grid))
+                else:
+                    x, y, _r = shape.geometry
+                    pads.append(autoroute.Pad(net, f"~{net}", x, y,
+                                              autoroute.Shape("circle", (x, y, 0.001), shape.layers, net), g))
+
+    by_net: dict[str, list] = {}
+    for p in pads:
+        by_net.setdefault(p.net, []).append(p)
+    order = sorted((n for n in chosen if autoroute._joins(by_net[n]) > 0),
+                   key=lambda n: (autoroute._span(by_net[n]), n))
+    head = [n for g in first or [] for n in order if fnmatch.fnmatchcase(n, g)]
+    order = list(dict.fromkeys(head + order))
+
+    result = autoroute.route(
+        bounds, pads, fixed, nets=order, grid=grid, layers=len(index), via_cost=via_cost,
+        layer_cost=tuple(layer_cost) if layer_cost else None, passes=passes, policy=policy,
+    )
+    layer_of = {i: layer for layer, i in index.items()}
+    tracks = [(net, layer_of[layer], x1, y1, x2, y2, policy.rule(net).width)
+              for net, layer, x1, y1, x2, y2 in result.tracks]
+    vias = [(net, x, y, policy.rule(net).via_diameter, policy.rule(net).via_drill) for net, x, y in result.vias]
+
+    failed: dict[str, list[str]] = {}
+    for net, pad in result.failed:
+        failed.setdefault(net, []).append(pad)
+    length = round(sum(math.hypot(t[4] - t[2], t[5] - t[3]) for t in tracks), 1)
+    out = {
+        "nets_routed": len([n for n in order if n not in failed]),
+        "nets_failed": len(failed),
+        "tracks": len(tracks),
+        "vias": len(vias),
+        "length_mm": length,
+        "passes": result.passes,
+        "taken_up": len(taken_up),
+        "grid": grid,
+        "failed": [{"net": n, "pads_left_off": ps} for n, ps in failed.items()],
+    }
+    if dru_path and dru.rules:
+        out["custom_rules"] = len(dru.rules)
+    if dru.skipped:
+        out["rules_not_understood"] = dru.skipped
+    if failed:
+        out["notes"] = ["Pads left off could not be reached at the net's width and clearance: "
+                        "move parts apart, use a finer grid, or route those nets first with `first`."]
+    return out, tracks, vias, taken_up
+
+
 def route(
     board: str | Path,
     nets: list[str] | None = None,
@@ -654,128 +922,59 @@ def route(
     allow_vias: bool = True,
     passes: int = 4,
     edge_clearance: float | None = None,
+    keep_existing: bool = False,
+    dry_run: bool = False,
 ) -> dict:
-    """Route nets with `autoroute`, at each net class's width and clearance.
+    """Route nets with `autoroute`, at each net class's width and clearance and the board's custom rules.
 
-    `nets` and `exclude` are names or globs; tracks the chosen nets already
-    have are taken up first, everything else on the board stays and is
-    routed around. `first` puts nets at the head of the order (short nets
-    lead otherwise). Zones are not seen: fill them after routing.
+    `nets` and `exclude` are names or globs. Without `keep_existing` the
+    tracks the chosen nets already have are taken up first; with it they stay
+    and only the missing connections are added. Zones are not seen.
     """
-    if grid <= 0:
-        raise ToolInputError("The routing grid must be positive.", remedy="Try 0.635 or 0.5 mm.")
     with pcb_file._LOCK:
         pcbnew, pcb, path = _open(board)
-        edges = pcb.GetBoardEdgesBoundingBox()
-        if edges.GetWidth() <= 0 or edges.GetHeight() <= 0:
-            raise ToolInputError("The board has no outline, so there is no area to route in.",
-                                 remedy="Draw one with set_board_outline first.")
-        bounds = (_mm(edges.GetLeft()), _mm(edges.GetTop()), _mm(edges.GetRight()), _mm(edges.GetBottom()))
-        index = _copper_index(pcbnew, pcb)
-        every = tuple(range(len(index)))
-        settings = pcb.GetDesignSettings()
-        if edge_clearance is None:
-            edge_clearance = _mm(settings.m_CopperEdgeClearance)
-
-        pads, holes, rules = [], [], {}
-        for fp in pcb.GetFootprints():
-            for pad in fp.Pads():
-                net = str(pad.GetNetname())
-                through = pad.GetAttribute() in (pcbnew.PAD_ATTRIB_PTH, pcbnew.PAD_ATTRIB_NPTH)
-                layers = every if through else tuple(
-                    i for layer, i in index.items() if pad.IsOnLayer(layer))
-                shape = _pad_shape(pcbnew, pad, layers)
-                if net and layers and pad.GetAttribute() != pcbnew.PAD_ATTRIB_NPTH:
-                    pos = pad.GetPosition()
-                    pads.append(autoroute.Pad(net, f"{fp.GetReference()}.{pad.GetNumber()}",
-                                              _mm(pos.x), _mm(pos.y), shape))
-                else:
-                    holes.append(shape)
-        default = pcb.GetDesignSettings().m_NetSettings.GetDefaultNetclass()
-        default_rule = _rule(default)
-        for net in pcb.GetNetsByName().values():
-            if net.GetNetCode() > 0:
-                rules[str(net.GetNetname())] = _rule(net.GetNetClass())
-
-        names = sorted({p.net for p in pads})
-        chosen = [n for n in names
-                  if (nets is None or any(fnmatch.fnmatchcase(n, g) for g in nets))
-                  and not any(fnmatch.fnmatchcase(n, g) for g in exclude or [])]
-        if nets and not chosen:
-            raise ToolInputError(f"No net on the board matches {nets}.",
-                                 remedy="Call list_nets for the names; sheet nets start with '/'.")
-        by_net: dict[str, list] = {}
-        for p in pads:
-            by_net.setdefault(p.net, []).append(p)
-        order = sorted((n for n in chosen if len(by_net[n]) > 1),
-                       key=lambda n: (autoroute._span(by_net[n]), n))
-        head = [n for g in first or [] for n in order if fnmatch.fnmatchcase(n, g)]
-        order = list(dict.fromkeys(head + order))
-
-        taken_up = 0
-        fixed = list(holes)
-        for track in list(pcb.GetTracks()):
-            net = str(track.GetNetname())
-            if net in chosen:
+        out, tracks, vias, taken_up = _plan_route(
+            pcbnew, pcb, path.with_suffix(".kicad_dru"), nets, exclude, first, grid, via_cost,
+            layer_cost, allow_vias, passes, edge_clearance, keep_existing)
+        if not dry_run:
+            for track in taken_up:
                 pcb.Remove(track)
-                taken_up += 1
-                continue
-            if _is_via(pcbnew, track):
-                pos = track.GetPosition()
-                fixed.append(autoroute.Shape(
-                    "circle", (_mm(pos.x), _mm(pos.y), _mm(track.GetWidth(pcbnew.F_Cu)) / 2), every, net or None))
-            elif track.GetLayer() in index:
-                a, b = track.GetStart(), track.GetEnd()
-                fixed.append(autoroute.Shape(
-                    "capsule", (_mm(a.x), _mm(a.y), _mm(b.x), _mm(b.y), _mm(track.GetWidth()) / 2),
-                    (index[track.GetLayer()],), net or None))
+            for net, layer, x1, y1, x2, y2, width in tracks:
+                track = pcbnew.PCB_TRACK(pcb)
+                track.SetStart(_pt(pcbnew, x1, y1))
+                track.SetEnd(_pt(pcbnew, x2, y2))
+                track.SetWidth(_nm(pcbnew, width))
+                track.SetLayer(layer)
+                track.SetNet(pcb.FindNet(net))
+                pcb.Add(track)
+            for net, x, y, diameter, drill in vias:
+                via = pcbnew.PCB_VIA(pcb)
+                via.SetPosition(_pt(pcbnew, x, y))
+                via.SetWidth(pcbnew.F_Cu, _nm(pcbnew, diameter))
+                via.SetDrill(_nm(pcbnew, drill))
+                via.SetNet(pcb.FindNet(net))
+                pcb.Add(via)
+            _save(pcbnew, pcb, path)
+    return {"board": str(path), "dry_run": dry_run, **out}
 
-        result = autoroute.route(
-            bounds, pads, fixed, rules, default_rule, nets=order, grid=grid, layers=len(index),
-            edge_clearance=edge_clearance, via_cost=via_cost,
-            layer_cost=tuple(layer_cost) if layer_cost else None, allow_vias=allow_vias, passes=passes,
-        )
 
-        layer_of = {i: layer for layer, i in index.items()}
-        length: dict[str, float] = {}
-        for net, layer, x1, y1, x2, y2 in result.tracks:
-            track = pcbnew.PCB_TRACK(pcb)
-            track.SetStart(_pt(pcbnew, x1, y1))
-            track.SetEnd(_pt(pcbnew, x2, y2))
-            track.SetWidth(_nm(pcbnew, rules.get(net, default_rule).width))
-            track.SetLayer(layer_of[layer])
-            track.SetNet(pcb.FindNet(net))
-            pcb.Add(track)
-            length[net] = length.get(net, 0.0) + math.hypot(x2 - x1, y2 - y1)
-        for net, x, y in result.vias:
-            rule = rules.get(net, default_rule)
-            via = pcbnew.PCB_VIA(pcb)
-            via.SetPosition(_pt(pcbnew, x, y))
-            via.SetWidth(pcbnew.F_Cu, _nm(pcbnew, rule.via_diameter))
-            via.SetDrill(_nm(pcbnew, rule.via_drill))
-            via.SetNet(pcb.FindNet(net))
-            pcb.Add(via)
-        _save(pcbnew, pcb, path)
-
-    failed: dict[str, list[str]] = {}
-    for net, pad in result.failed:
-        failed.setdefault(net, []).append(pad)
-    out = {
-        "board": str(path),
-        "nets_routed": len([n for n in order if n not in failed]),
-        "nets_failed": len(failed),
-        "tracks": len(result.tracks),
-        "vias": len(result.vias),
-        "length_mm": round(sum(length.values()), 1),
-        "passes": result.passes,
-        "taken_up": taken_up,
-        "grid": grid,
-        "failed": [{"net": n, "pads_left_off": ps} for n, ps in failed.items()],
-    }
-    if failed:
-        out["notes"] = ["Pads left off could not be reached at the net's width and clearance: "
-                        "move parts apart, use a finer grid, or route those nets first with `first`."]
-    return out
+def route_live(live, path: Path, dry_run: bool = False, **kwargs) -> dict:
+    """`route` on the board open in KiCad: planned on a saved copy, applied as one undo step."""
+    with pcb_file._LOCK, tempfile.TemporaryDirectory(prefix="kicad-mcp-route-") as tmp:
+        copy = Path(tmp) / path.name
+        live.save_as(str(copy), overwrite=True, include_project=True)
+        pcbnew = pcb_file._pcbnew()
+        pcb = pcbnew.LoadBoard(str(copy))
+        if pcb is None:
+            raise ToolInputError("pcbnew could not load a copy of the open board.",
+                                 remedy="Check that the board opens in KiCad 10.")
+        out, tracks, vias, taken_up = _plan_route(pcbnew, pcb, path.with_suffix(".kicad_dru"), **kwargs)
+        removed = [t.m_Uuid.AsString() for t in taken_up]
+        layers = {layer: str(pcb.GetLayerName(layer)) for layer in {t[1] for t in tracks}}
+        tracks = [(net, layers[layer], *rest) for net, layer, *rest in tracks]
+    if not dry_run:
+        pcb_live.apply_route(live, removed, tracks, vias)
+    return {"board": str(path), "live": True, "dry_run": dry_run, **out}
 
 
 def _rule(netclass) -> autoroute.Rule:

@@ -24,7 +24,7 @@ from .altium import importer as _altium_importer
 from . import board_edit, hierarchy, pcb_common, pcb_file, pcb_live, units
 from .discovery import find_install, find_installs
 from .editor import SchematicEditor, add_decoupling_capacitors as _add_decoupling_capacitors
-from .errors import KicadMcpError, NoEditorOpenError
+from .errors import KicadMcpError, NoEditorOpenError, ToolInputError
 from .footprints import FootprintIndex, footprint_warning
 from .generator import generate_pinout_schematic
 from .library import create_symbol
@@ -1029,18 +1029,58 @@ def update_board_from_schematic(schematic: str, board: str | None = None) -> dic
     return board_edit.update_from_schematic(install(), schematic, board)
 
 
+def _live_for(board: str):
+    """The board open in KiCad when it is the file `board`; None otherwise."""
+    try:
+        live = SESSION.board()
+    except Exception:  # noqa: BLE001 - no KiCad, no editor: work on the file
+        return None
+    where = pcb_live.file_path(live)
+    try:
+        same = where is not None and Path(where).resolve() == Path(board).resolve()
+    except OSError:
+        same = False
+    return live if same else None
+
+
 @mcp.tool()
 @tool_result
-def place_footprints(board: str, placements: list[dict]) -> dict:
-    """Move, turn and flip footprints on a .kicad_pcb, with KiCad closed.
+def place_footprints(board: str, placements: list[dict], drag_tracks: bool = False) -> dict:
+    """Move, turn and flip footprints on a .kicad_pcb.
+
+    When `board` is the file open in KiCad's PCB editor the change is made
+    there, live, as one undo step (save it from KiCad); otherwise the file is
+    edited, which needs KiCad closed or the board reloaded after.
 
     Each placement is {"reference", "x", "y", "angle", "side"}: `x`/`y` in mm
     put the footprint's origin there (both or neither), `angle` in degrees
-    counter-clockwise as KiCad shows it, `side` "front" or "back". Returns each
-    footprint's place and its box (pads and graphics, without texts), which is
-    what to check for overlaps. Tracks do not follow a moved footprint.
+    counter-clockwise as KiCad shows it, `side` "front" or "back". With
+    `drag_tracks` the track ends sitting on the footprint's pads move with
+    them, so the routing stays joined (check the stretched tracks with
+    run_drc); otherwise tracks stay put. On a file it returns each footprint's
+    box (pads and graphics, without texts), which is what to check for overlaps.
     """
-    return board_edit.place_footprints(board, placements)
+    live = _live_for(board)
+    if live is not None:
+        for i, spec in enumerate(placements):
+            if "reference" not in spec:
+                raise ToolInputError(f"Placement {i + 1} has no reference.",
+                                     remedy='Each needs "reference" and any of "x"/"y", "angle", "side".')
+            if ("x" in spec) != ("y" in spec):
+                raise ToolInputError(f"{spec['reference']}: x and y go together.",
+                                     remedy="Pass both, or neither to keep the position.")
+            if spec.get("side") not in (None, "front", "back"):
+                raise ToolInputError(f"{spec['reference']}: side is {spec['side']!r}.",
+                                     remedy='Use "front" or "back".')
+        try:
+            rows, dragged = pcb_live.place(live, placements, drag_tracks)
+        except ValueError as exc:
+            raise ToolInputError(str(exc), remedy="Call list_footprints for the references it has.") from exc
+        out = {"board": board, "live": True, "placed": rows}
+        if drag_tracks:
+            out["tracks_dragged"] = dragged
+        return out
+    return board_edit.place_footprints(board, placements, drag_tracks)
 
 
 @mcp.tool()
@@ -1089,34 +1129,57 @@ def set_net_classes(board: str, classes: list[dict]) -> dict:
 def route_board(board: str, nets: list[str] | None = None, exclude: list[str] | None = None,
                 first: list[str] | None = None, grid: float = 0.635, via_cost: float = 10.0,
                 layer_cost: list[float] | None = None, allow_vias: bool = True,
-                passes: int = 4, edge_clearance: float | None = None) -> dict:
-    """Autoroute a .kicad_pcb with the built-in grid router, with KiCad closed.
+                passes: int = 4, edge_clearance: float | None = None,
+                keep_existing: bool = False, dry_run: bool = False) -> dict:
+    """Autoroute a .kicad_pcb with the built-in grid router.
+
+    When `board` is the file open in KiCad's PCB editor the routing is planned
+    on a copy and laid on the open board, live, as one undo step (save it from
+    KiCad); otherwise the file is edited, which needs KiCad closed.
 
     Tracks get the width of their net class and keep its clearance (the larger
-    of the two classes') from every other net's pads, tracks and vias, and the
-    board's edge clearance from the outline. `nets` and `exclude` are names or
-    globs; tracks the chosen nets have are taken up and routed again, the rest
-    of the board is routed around. Short nets go first unless `first` names the
-    ones to lead. `grid` in mm is the lattice tracks run on, at 45 degree steps:
-    finer finds more ways through and takes longer. `layer_cost` is a cost per
-    copper layer, front first ([3, 1] keeps tracks on the back where it can);
-    `via_cost` is in mm of track; `allow_vias` False changes layer only at
-    through-hole pads.
+    of the two classes'), and the board's custom rules in the .kicad_dru beside
+    it on top: clearance, physical_clearance and hole_clearance between nets
+    and to holes, edge_clearance, track_width, and disallowed tracks or vias
+    per layer and net. A rule whose condition uses something the reader does
+    not model is skipped and listed in `rules_not_understood`.
 
-    It is a maze router that rips up nothing: nets that find no way are
-    reported in `failed` with the pads left off, and a retry pass routes those
-    first. Zones are not seen, and there is no length or differential-pair
-    tuning. Check the result with run_drc.
+    `nets` and `exclude` are names or globs. Without `keep_existing` the tracks
+    the chosen nets have are taken up and routed again; with it they stay, and
+    only what is missing is added, joining each net's islands of copper
+    (pads and existing tracks) into one. The rest of the board is routed
+    around. Short nets go first unless `first` names the ones to lead. `grid`
+    in mm is the lattice tracks run on, at 45 degree steps: finer finds more
+    ways through and takes longer. `layer_cost` is a cost per copper layer,
+    front first ([3, 1] keeps tracks on the back where it can); `via_cost` is
+    in mm of track; `allow_vias` False changes layer only at through-hole
+    pads. `dry_run` reports what would be laid and writes nothing.
+
+    It is a maze router that rips up nothing: what finds no way is reported in
+    `failed` with the pads left off, and a retry pass routes those nets first.
+    Zones are not seen, and there is no length or differential-pair tuning.
+    Check the result with run_drc.
     """
-    return board_edit.route(board, nets=nets, exclude=exclude, first=first, grid=grid,
-                            via_cost=via_cost, layer_cost=layer_cost, allow_vias=allow_vias,
-                            passes=passes, edge_clearance=edge_clearance)
+    options = dict(nets=nets, exclude=exclude, first=first, grid=grid, via_cost=via_cost,
+                   layer_cost=layer_cost, allow_vias=allow_vias, passes=passes,
+                   edge_clearance=edge_clearance, keep_existing=keep_existing)
+    live = _live_for(board)
+    if live is not None:
+        return board_edit.route_live(live, Path(board).resolve(), dry_run=dry_run, **options)
+    return board_edit.route(board, dry_run=dry_run, **options)
 
 
 @mcp.tool()
 @tool_result
 def unroute_board(board: str, nets: list[str] | None = None) -> dict:
-    """Remove tracks and vias from a .kicad_pcb: those of the nets matching `nets` (names or globs), or all of them."""
+    """Remove tracks and vias from a .kicad_pcb: those of the nets matching `nets` (names or globs), or all of them.
+
+    When `board` is the file open in KiCad's PCB editor they go from the open
+    board, live, as one undo step; otherwise from the file, with KiCad closed.
+    """
+    live = _live_for(board)
+    if live is not None:
+        return {"board": board, "live": True, "removed": pcb_live.unroute(live, nets)}
     return board_edit.unroute(board, nets)
 
 
